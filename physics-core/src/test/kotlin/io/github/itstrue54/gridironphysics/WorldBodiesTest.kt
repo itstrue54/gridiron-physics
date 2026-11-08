@@ -144,6 +144,13 @@ class WorldBodiesTest {
             override fun onSetIntent(tick: Long, id: BodyId, intent: LocomotionIntent) {}
             override fun onSetStance(tick: Long, id: BodyId, stance: Stance) {}
             override fun onSetSurface(tick: Long, surface: SurfaceConfig) {}
+            override fun onCreateGrapple(tick: Long, id: JointId, tackler: BodyId, carrier: BodyId, def: GrappleDef) {}
+            override fun onCreateBlock(tick: Long, id: JointId, blocker: BodyId, defender: BodyId, def: BlockDef) {}
+            override fun onCreateDistance(tick: Long, id: JointId, a: BodyId, b: BodyId, def: DistanceDef) {}
+            override fun onCreateWeld(tick: Long, id: JointId, a: BodyId, b: BodyId, def: WeldDef) {}
+            override fun onDestroyJoint(tick: Long, id: JointId) {}
+            override fun onSetBallCarrier(tick: Long, id: BodyId?) {}
+            override fun onSetAttackDirection(tick: Long, direction: Int) {}
         }
         val id = w.createBody(BodyDef())
         w.step()

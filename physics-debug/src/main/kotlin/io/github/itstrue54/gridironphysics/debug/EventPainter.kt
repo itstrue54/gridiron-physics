@@ -18,11 +18,15 @@ private val SlipColor = Color(0xFFFFEA00)
 private val OutColor = Color(0xFFFF1744)
 private val GoalColor = Color(0xFFFFD740)
 private val SensorColorMark = Color(0xFF80D8FF)
+private val BreakColor = Color(0xFFFF5252)
+private val ShedColor = Color(0xFFB388FF)
+private val DownColor = Color(0xFFFFFFFF)
 
 /**
  * Event markers from [ViewerState.markers], fading out over [ViewerState.MARKER_TICKS]: an expanding orange ring
  * for a hit, a magenta cross for a trip, yellow dots along a slipping player's path, a red box when a player goes
- * out, a gold diamond where a goal line was crossed, and a small cyan ring when a body touches a field line.
+ * out, a gold diamond where a goal line was crossed, a small cyan ring when a body touches a field line, a red burst
+ * where a grapple broke, a violet burst where a block was shed, and a white box around a player who went down.
  */
 fun DrawScope.drawEvents(t: ViewTransform, s: ViewerState, text: TextMeasurer) {
     val now = s.world.tick
@@ -57,6 +61,23 @@ fun DrawScope.drawEvents(t: ViewTransform, s: ViewerState, text: TextMeasurer) {
                 drawLine(col, Offset(c.x, c.y + h), Offset(c.x - h, c.y), strokeWidth = 3f)
                 drawLine(col, Offset(c.x - h, c.y), Offset(c.x, c.y - h), strokeWidth = 3f)
                 label(text, m.label, c, h, GoalColor, fade)
+            }
+            EventType.GrappleBroken, EventType.BlockShed -> {
+                // A burst: short spokes flying out from where the joint gave way.
+                val col = (if (m.type == EventType.GrappleBroken) BreakColor else ShedColor).copy(alpha = fade)
+                val r0 = t.len(0.15 + 0.5 * age).coerceAtLeast(4f)
+                val r1 = r0 + t.len(0.25).coerceAtLeast(5f)
+                for (k in 0 until 8) {
+                    val ang = k * Math.PI / 4 + Math.PI / 8
+                    val dx = Math.cos(ang).toFloat(); val dy = Math.sin(ang).toFloat()
+                    drawLine(col, Offset(c.x + dx * r0, c.y + dy * r0), Offset(c.x + dx * r1, c.y + dy * r1), strokeWidth = 3f)
+                }
+                label(text, m.label, c, r1, if (m.type == EventType.GrappleBroken) BreakColor else ShedColor, fade)
+            }
+            EventType.Down -> {
+                val h = t.len(0.55).coerceAtLeast(7f)
+                drawRect(DownColor.copy(alpha = fade), Offset(c.x - h, c.y - h), Size(2 * h, 2 * h), style = Stroke(width = 2f))
+                label(text, m.label, c, h, DownColor, fade, below = true)
             }
             EventType.SensorBegin -> drawCircle(SensorColorMark.copy(alpha = 0.7f * fade), t.len(0.25).coerceAtLeast(4f), c, style = Stroke(width = 1.5f))
             else -> {}

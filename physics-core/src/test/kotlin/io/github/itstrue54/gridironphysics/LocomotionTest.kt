@@ -375,6 +375,13 @@ class LocomotionTest {
             }
             override fun onSetStance(tick: Long, id: BodyId, stance: Stance) { log += "s:${id.value}:$stance@$tick" }
             override fun onSetSurface(tick: Long, surface: SurfaceConfig) { log += "f:${surface.name}@$tick" }
+            override fun onCreateGrapple(tick: Long, id: JointId, tackler: BodyId, carrier: BodyId, def: GrappleDef) {}
+            override fun onCreateBlock(tick: Long, id: JointId, blocker: BodyId, defender: BodyId, def: BlockDef) {}
+            override fun onCreateDistance(tick: Long, id: JointId, a: BodyId, b: BodyId, def: DistanceDef) {}
+            override fun onCreateWeld(tick: Long, id: JointId, a: BodyId, b: BodyId, def: WeldDef) {}
+            override fun onDestroyJoint(tick: Long, id: JointId) {}
+            override fun onSetBallCarrier(tick: Long, id: BodyId?) {}
+            override fun onSetAttackDirection(tick: Long, direction: Int) {}
         }
         val p = w.createBody(BodyDef())
         w.setAthlete(p, AthleteParams(maxSpeed = 8.0))

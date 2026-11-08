@@ -8,6 +8,7 @@ import io.github.itstrue54.gridironphysics.World
 import io.github.itstrue54.gridironphysics.math.DMath
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class ScenariosTest {
@@ -321,12 +322,77 @@ class ScenariosTest {
         assertEquals(eventLabEvents(240), eventLabEvents(240))
     }
 
+    // ------------------------------------------------------------ M5: joints
+
+    private fun jointList(w: World): List<io.github.itstrue54.gridironphysics.JointId> {
+        val out = IntArray(16)
+        val n = w.jointIds(out)
+        return (0 until n).map { io.github.itstrue54.gridironphysics.JointId(out[it]) }
+    }
+
+    private fun runEvents(w: World, ticks: Int): List<EventType> {
+        val out = ArrayList<EventType>()
+        repeat(ticks) { w.step(); val r = w.events(); while (r.next()) out += r.type }
+        return out
+    }
+
+    @Test fun tackleWithGrappleStacksDragToStopTheCarrierAndTheArmTackleBreaks() {
+        val w = Scenarios.tackleWithGrapple.build()
+        val carrier = w.ballCarrier!!
+        val x0 = w.body(carrier).x
+        val joints = jointList(w)
+        assertEquals(3, joints.size)
+        val gang = joints.filter { w.joint(it).bodyB == carrier }
+        assertEquals(2, gang.size, "two grapples on the ball carrier")
+        val arm = joints.single { w.joint(it).bodyB != carrier }
+        var peakArmLoad = 0.0
+        val evs = ArrayList<EventType>()
+        repeat(240) {
+            evs += runEvents(w, 1)
+            if (w.hasJoint(arm)) peakArmLoad = maxOf(peakArmLoad, w.joint(arm).load)
+        }
+        assertTrue(EventType.GrappleBroken in evs, "the arm tackle breaks")
+        assertTrue(peakArmLoad > 0.5, "and visibly strains first: peak load $peakArmLoad")
+        assertFalse(w.hasJoint(arm))
+        assertTrue(gang.all { w.hasJoint(it) }, "the gang tackle holds")
+        val b = w.body(carrier)
+        assertTrue(DMath.hypot2(b.vx, b.vy) < 0.5, "the carrier is stopped: ${DMath.hypot2(b.vx, b.vy)} m/s")
+        val gained = b.x - x0
+        assertTrue(gained in 2.0..12.0, "dragged a few yards: $gained m")
+        assertEquals(w.forwardProgressX, maxOf(w.forwardProgressX, b.x), "progress is at least where he stands")
+        assertTrue(w.forwardProgressX >= x0 + gained - 1e-9)
+    }
+
+    @Test fun doubleTeamDrivesTheLinemanBackAndTheOneOnOneSheds() {
+        val w = Scenarios.doubleTeam.build()
+        val ids = ids(w)
+        val nose = ids.single { w.body(it).mass == 150.0 }
+        val x0 = w.body(nose).x
+        val y0 = w.body(nose).y
+        val onNose = jointList(w).filter { w.joint(it).bodyB == nose }
+        assertEquals(2, onNose.size, "double team")
+        val evs = runEvents(w, 180)
+        assertTrue(EventType.BlockShed in evs, "the one-on-one is shed")
+        assertTrue(onNose.all { w.hasJoint(it) }, "the double team holds")
+        assertTrue(w.body(nose).x - x0 > 1.0, "the lineman is driven back: ${w.body(nose).x - x0} m")
+        assertEquals(y0, w.body(nose).y, 0.1, "and stays on his line")
+    }
+
+    @Test fun jointScenariosAreDeterministic() {
+        for (s in listOf(Scenarios.tackleWithGrapple, Scenarios.doubleTeam)) {
+            fun run(): List<Long> { val w = s.build(); return (0 until 240).map { w.step(); w.stateHash() } }
+            assertEquals(run(), run(), s.name)
+        }
+    }
+
     @Test fun registryListsDrift() {
         assertTrue(Scenarios.drift in Scenarios.all)
         assertTrue(Scenarios.sidelineRun in Scenarios.all)
         assertTrue(Scenarios.headOnTackle in Scenarios.all)
         assertTrue(Scenarios.contactLab in Scenarios.all)
         assertTrue(Scenarios.eventLab in Scenarios.all)
+        assertTrue(Scenarios.tackleWithGrapple in Scenarios.all)
+        assertTrue(Scenarios.doubleTeam in Scenarios.all)
         assertEquals(Scenarios.all.size, Scenarios.all.map { it.name }.toSet().size, "scenario names are unique")
     }
 }

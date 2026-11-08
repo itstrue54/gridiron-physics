@@ -29,6 +29,11 @@ data class WorldConfig(
     val eventCapacity: Int = 1024,
     /** Slowest a player can move (m/s) and still trip over a Down body ([EventType.Trip]). */
     val tripMinSpeed: Double = 1.0,
+    /** Joint pool size ([World.createGrapple] and friends throw when it is full). */
+    val maxJoints: Int = 64,
+    /** Softness of rigid joint rows (distance and weld with hertz 0) while solving velocities, as in Box2D v3. */
+    val jointHertz: Double = 60.0,
+    val jointDampingRatio: Double = 2.0,
 ) {
     init {
         require(maxBodies > 0) { "maxBodies must be > 0" }
@@ -40,6 +45,8 @@ data class WorldConfig(
         require(slideFriction.isFinite() && slideFriction >= 0.0) { "slideFriction must be finite and >= 0: $slideFriction" }
         require(eventCapacity > 0) { "eventCapacity must be > 0: $eventCapacity" }
         require(tripMinSpeed.isFinite() && tripMinSpeed >= 0.0) { "tripMinSpeed must be finite and >= 0: $tripMinSpeed" }
+        require(maxJoints in 1..BodyId.MAX_SLOTS) { "maxJoints must be in 1..${BodyId.MAX_SLOTS}: $maxJoints" }
+        require(jointHertz.isFinite() && jointHertz > 0.0 && jointDampingRatio.isFinite() && jointDampingRatio >= 0.0) { "bad joint softness" }
         require(sleepTimeS >= 0.0 && sleepSpeed >= 0.0 && gravity >= 0.0) { "bad sleep/gravity" }
     }
 

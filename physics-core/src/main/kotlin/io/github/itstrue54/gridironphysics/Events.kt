@@ -54,6 +54,25 @@ enum class EventType {
      * [FieldLine.AWAY_GOAL_LINE]), [EventReader.direction] (+1 toward +x) and the crossing point.
      */
     GoalLineCrossed,
+
+    /**
+     * A grapple's pull reached its [GrappleDef.breakForce] and the joint broke (it is gone when the event is read).
+     * Sets bodyA (tackler), bodyB (carrier), [EventReader.joint] and [EventReader.force] (the pull, N).
+     */
+    GrappleBroken,
+
+    /**
+     * Holding a block squared up took [BlockDef.shedThreshold]: the block is shed and the joint is gone. Sets bodyA
+     * (blocker), bodyB (defender), [EventReader.joint] and [EventReader.force] (the lateral force, N).
+     */
+    BlockShed,
+
+    /**
+     * A body's stance became [Stance.Down] (from setStance or an intent's stance). Stamped with the current
+     * [World.tick], since stances change between steps. Sets bodyA and [EventReader.ballCarrier]; for the ball
+     * carrier also [EventReader.forwardProgressX], where the game spots the ball.
+     */
+    Down,
 }
 
 /**
@@ -143,7 +162,7 @@ class EventReader internal constructor(capacity: Int) {
             val s = slot()
             check(ints[s * INTS + I_WALL] == ContactView.NO_WALL) { "bodyB is runoff wall ${ints[s * INTS + I_WALL]}, not a body" }
             val t = types[s]
-            check(t == T_CONTACT_BEGIN || t == T_CONTACT_END || t == T_HIT || t == T_TRIP) { "${TYPES[t]} has no bodyB" }
+            check(t == T_CONTACT_BEGIN || t == T_CONTACT_END || t == T_HIT || t == T_TRIP || t == T_GRAPPLE_BROKEN || t == T_BLOCK_SHED) { "${TYPES[t]} has no bodyB" }
             return BodyId(ints[s * INTS + I_B])
         }
 
@@ -190,6 +209,26 @@ class EventReader internal constructor(capacity: Int) {
     /** Trip: the moving player's speed just before the contact (m/s). */
     val speed: Double get() = doubles[slot() * DOUBLES + D_VALUE]
 
+    /** GrappleBroken and BlockShed: the joint that broke. Throws for other events. */
+    val joint: JointId
+        get() {
+            val s = slot()
+            check(types[s] == T_GRAPPLE_BROKEN || types[s] == T_BLOCK_SHED) { "${TYPES[types[s]]} has no joint" }
+            return JointId(ints[s * INTS + I_JOINT])
+        }
+
+    /** GrappleBroken: the pull (N); BlockShed: the lateral force (N) when it gave way. */
+    val force: Double get() = doubles[slot() * DOUBLES + D_VALUE]
+
+    /**
+     * Down: the ball carrier's farthest x toward the attack direction while he was Upright with the ball
+     * ([World.forwardProgressX]). 0 when the body is not the carrier.
+     */
+    val forwardProgressX: Double get() = doubles[slot() * DOUBLES + D_VALUE]
+
+    /** Down: the body is the ball carrier ([World.setBallCarrier]). */
+    val ballCarrier: Boolean get() = ints[slot() * INTS + I_CARRIER] != 0
+
     // ------------------------------------------------------------ writing (World only)
 
     /** Starts a new event and returns its slot; every field is reset, so callers set only what the type uses. */
@@ -207,6 +246,7 @@ class EventReader internal constructor(capacity: Int) {
         val i = s * INTS
         ints[i + I_A] = a; ints[i + I_B] = 0; ints[i + I_WALL] = ContactView.NO_WALL
         ints[i + I_LINE] = FieldLine.NONE; ints[i + I_DIR] = 0; ints[i + I_SENSOR] = 0
+        ints[i + I_JOINT] = -1; ints[i + I_CARRIER] = 0
         val d = s * DOUBLES
         for (k in 0 until DOUBLES) doubles[d + k] = 0.0
         return s
@@ -226,14 +266,19 @@ class EventReader internal constructor(capacity: Int) {
         val T_SENSOR_END = EventType.SensorEnd.ordinal
         val T_OUT_OF_BOUNDS = EventType.OutOfBounds.ordinal
         val T_GOAL_LINE = EventType.GoalLineCrossed.ordinal
+        val T_GRAPPLE_BROKEN = EventType.GrappleBroken.ordinal
+        val T_BLOCK_SHED = EventType.BlockShed.ordinal
+        val T_DOWN = EventType.Down.ordinal
 
-        const val INTS = 6
+        const val INTS = 8
         const val I_A = 0
         const val I_B = 1
         const val I_WALL = 2
         const val I_LINE = 3
         const val I_DIR = 4
         const val I_SENSOR = 5
+        const val I_JOINT = 6
+        const val I_CARRIER = 7
 
         const val DOUBLES = 13
         const val D_PX = 0

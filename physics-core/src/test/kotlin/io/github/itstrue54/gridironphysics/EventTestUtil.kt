@@ -23,9 +23,14 @@ data class Ev(
     val momBX: Double,
     val momBY: Double,
     val value: Double,
+    /** GrappleBroken / BlockShed: the joint id; else -1. */
+    val joint: Int = -1,
+    /** Down: true when the body is the ball carrier. */
+    val ballCarrier: Boolean = false,
 )
 
-private val PAIR_TYPES = setOf(EventType.ContactBegin, EventType.ContactEnd, EventType.Hit, EventType.Trip)
+private val PAIR_TYPES = setOf(EventType.ContactBegin, EventType.ContactEnd, EventType.Hit, EventType.Trip, EventType.GrappleBroken, EventType.BlockShed)
+private val JOINT_TYPES = setOf(EventType.GrappleBroken, EventType.BlockShed)
 
 /** Reads every pending event. */
 fun World.drain(): List<Ev> {
@@ -38,6 +43,8 @@ fun World.drain(): List<Ev> {
             r.pointX, r.pointY, r.normalX, r.normalY, r.closingSpeed, r.normalImpulse,
             r.angleToHeadingA, r.angleToHeadingB, r.momentumAX, r.momentumAY, r.momentumBX, r.momentumBY,
             r.slipExcess,
+            if (r.type in JOINT_TYPES) r.joint.value else -1,
+            r.type == EventType.Down && r.ballCarrier,
         )
     }
     return out

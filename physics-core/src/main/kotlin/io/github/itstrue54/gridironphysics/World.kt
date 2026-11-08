@@ -7,6 +7,8 @@ import io.github.itstrue54.gridironphysics.internal.BruteForceBroadPhase
 import io.github.itstrue54.gridironphysics.internal.Collide
 import io.github.itstrue54.gridironphysics.internal.Contact
 import io.github.itstrue54.gridironphysics.internal.Geom
+import io.github.itstrue54.gridironphysics.internal.Joint
+import io.github.itstrue54.gridironphysics.internal.Softness
 import io.github.itstrue54.gridironphysics.internal.LocomotionController
 import io.github.itstrue54.gridironphysics.internal.RayCast
 import io.github.itstrue54.gridironphysics.internal.RayResult
@@ -129,6 +131,12 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
             val c = contacts[i]
             if (c.a === dead) wake(c.b!!) else if (c.b === dead) wake(c.a!!)
         }
+        // Its joints go with it (not a command of their own, and not a break).
+        for (k in 0 until jointHighWater) {
+            val j = joints[k] ?: continue
+            if (j.a === dead || j.b === dead) removeJoint(j)
+        }
+        if (carrier === dead) { carrier = null; forwardProgressX = Double.NaN }
         val slot = id.slot
         bodies[slot] = null
         generations[slot] = (generations[slot] + 1) and BodyId.GEN_MASK
@@ -237,6 +245,14 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
         } else {
             b.lyingShape ?: ShapeDef.Capsule(LYING_HALF_LENGTH * up.radius, LYING_RADIUS * up.radius, up.sensor).also { b.lyingShape = it }
         }
+        if (stance == Stance.Down && b.stance != Stance.Down) {
+            // Stances change between steps, so the event carries the current tick.
+            val e = eventReader.add(EventReader.T_DOWN, tick, b.id)
+            if (b === carrier) {
+                eventReader.setInt(e, EventReader.I_CARRIER, 1)
+                eventReader.setDouble(e, EventReader.D_VALUE, forwardProgressX)
+            }
+        }
         b.stance = stance
         b.material = if (stance == Stance.Down) Material.DOWNED_PLAYER else b.baseMaterial
         if (shape !== b.shape) {
@@ -262,6 +278,186 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
         require(index in 0 until contactCount) { "contact $index out of range 0 until $contactCount" }
         contactView.c = contacts[index]
         return contactView
+    }
+
+    // ---------------------------------------------------------------- joints
+
+    // Slot-indexed like bodies: iterating slots in order is iterating joints in ascending id order, which is the
+    // order the solver runs them in.
+    private val joints = arrayOfNulls<Joint>(config.maxJoints)
+    private val jointGenerations = IntArray(config.maxJoints)
+    private var jointLive = 0
+    private var jointHighWater = 0
+    private val jointView = JointView()
+
+    /** Softness of rigid joint rows while solving velocities; the relax pass runs them fully rigid. */
+    private val rigidJoint = Softness.of(config.jointHertz, config.jointDampingRatio)
+
+    /**
+     * A tackler wraps up a carrier: a soft, pull-only rope between their centers that breaks when its pull reaches
+     * [GrappleDef.breakForce] ([EventType.GrappleBroken]), plus drag that slows the carrier. Grapples on one carrier
+     * stack. The tackler may be any body type (a static one is a tackler with planted feet); the carrier must be
+     * dynamic. Wakes both. The engine never decides the tackle: the game sets the carrier [Stance.Down].
+     */
+    fun createGrapple(tackler: BodyId, carrier: BodyId, def: GrappleDef): JointId {
+        val t = live(tackler); val c = live(carrier)
+        require(c.type == BodyType.Dynamic) { "The carrier must be dynamic: body ${carrier.value} is ${c.type}" }
+        val j = newJoint(JointType.Grapple, t, c, def.length, Softness.of(def.hertz, def.dampingRatio))
+        j.breakForce = def.breakForce
+        j.dragForce = def.dragForce
+        val id = JointId(j.id)
+        recorder?.onCreateGrapple(tick, id, tackler, carrier, def)
+        return id
+    }
+
+    /**
+     * Engages a block between [blocker] and [defender]; see [BlockDef]. Both bodies stay awake while engaged.
+     * Several blocks on one defender (a double team) each push and shed on their own.
+     */
+    fun createBlock(blocker: BodyId, defender: BodyId, def: BlockDef): JointId {
+        val a = live(blocker); val b = live(defender)
+        val j = newJoint(JointType.Block, a, b, def.length, Softness.of(def.hertz, def.dampingRatio))
+        j.pushForceA = def.blockerPushForce
+        j.pushForceB = def.defenderPushForce
+        j.shedThreshold = def.shedThreshold
+        j.driveSpeed = def.driveSpeed
+        val id = JointId(j.id)
+        recorder?.onCreateBlock(tick, id, blocker, defender, def)
+        return id
+    }
+
+    /** Holds the centers of [a] and [b] at a distance, rigidly or as a spring; see [DistanceDef]. Wakes both. */
+    fun createDistance(a: BodyId, b: BodyId, def: DistanceDef): JointId {
+        val ba = live(a); val bb = live(b)
+        val j = newJoint(JointType.Distance, ba, bb, def.length, if (def.hertz == 0.0) null else Softness.of(def.hertz, def.dampingRatio))
+        val id = JointId(j.id)
+        recorder?.onCreateDistance(tick, id, a, b, def)
+        return id
+    }
+
+    /** Glues [b] to [a] in their current relative position and angle; see [WeldDef]. Wakes both. */
+    fun createWeld(a: BodyId, b: BodyId, def: WeldDef): JointId {
+        val ba = live(a); val bb = live(b)
+        val j = newJoint(JointType.Weld, ba, bb, null, if (def.hertz == 0.0) null else Softness.of(def.hertz, def.dampingRatio))
+        val c = DMath.cos(ba.angle); val s = DMath.sin(ba.angle)
+        val dx = bb.x - ba.x; val dy = bb.y - ba.y
+        j.localX = c * dx + s * dy
+        j.localY = -s * dx + c * dy
+        j.refAngle = bb.angle - ba.angle
+        val id = JointId(j.id)
+        recorder?.onCreateWeld(tick, id, a, b, def)
+        return id
+    }
+
+    /** Removes a joint and wakes both bodies. Throws [IllegalArgumentException] for a joint that is gone (destroyed, broken or shed). */
+    fun destroyJoint(id: JointId) {
+        removeJoint(liveJoint(id))
+        recorder?.onDestroyJoint(tick, id)
+    }
+
+    /** True while the joint exists: false once it is destroyed, broken or shed, or one of its bodies was destroyed. */
+    fun hasJoint(id: JointId): Boolean {
+        if (id.value < 0) return false
+        val slot = id.slot
+        if (slot >= jointHighWater) return false
+        val j = joints[slot]
+        return j != null && j.id == id.value
+    }
+
+    /** Read-only view of a joint. The returned object is reused by the next call. */
+    fun joint(id: JointId): JointView {
+        jointView.j = liveJoint(id)
+        return jointView
+    }
+
+    /** Number of live joints. */
+    val jointCount: Int get() = jointLive
+
+    /** Writes live joint ids ([JointId.value]) in ascending order into [out] and returns how many (at most `out.size`). */
+    fun jointIds(out: IntArray): Int {
+        var n = 0
+        for (k in 0 until jointHighWater) {
+            if (n == out.size) break
+            val j = joints[k] ?: continue
+            out[n++] = j.id
+        }
+        return n
+    }
+
+    private fun liveJoint(id: JointId): Joint {
+        require(hasJoint(id)) { "Joint ${id.value} does not exist (destroyed, broken, shed or never created)" }
+        return joints[id.slot]!!
+    }
+
+    private fun newJoint(type: JointType, a: Body, b: Body, length: Double?, soft: Softness?): Joint {
+        require(a !== b) { "A joint needs two different bodies: ${a.id}" }
+        require(a.type == BodyType.Dynamic || b.type == BodyType.Dynamic) { "A joint needs a dynamic body: ${a.id} is ${a.type}, ${b.id} is ${b.type}" }
+        check(jointLive < config.maxJoints) { "Joint pool is full: ${config.maxJoints} live joints" }
+        var slot = 0
+        while (joints[slot] != null) slot++
+        val id = JointId.of(slot, jointGenerations[slot])
+        val rest = length ?: DMath.hypot2(b.x - a.x, b.y - a.y)
+        // A centre-to-centre joint of length 0 has no direction to act along.
+        require(type == JointType.Weld || rest > Joint.MIN_LENGTH) { "Bodies ${a.id} and ${b.id} share a center: pass a length in the def" }
+        val j = Joint(id.value, type, a, b, rest, soft)
+        joints[slot] = j
+        jointLive++
+        if (slot >= jointHighWater) jointHighWater = slot + 1
+        wake(a); wake(b)
+        return j
+    }
+
+    private fun removeJoint(j: Joint) {
+        val slot = JointId(j.id).slot
+        joints[slot] = null
+        jointGenerations[slot] = (jointGenerations[slot] + 1) and BodyId.GEN_MASK
+        jointLive--
+        wake(j.a); wake(j.b)
+    }
+
+    // ---------------------------------------------------------------- ball carrier and forward progress
+
+    private var carrier: Body? = null
+
+    /** +1 when the offense attacks toward +x, −1 toward −x. Defaults to +1. */
+    var attackDirection: Int = 1
+        private set
+
+    /**
+     * The ball carrier's farthest x toward [attackDirection] while he was [Stance.Upright] with the ball, as of
+     * the end of the last step (or the moment he got the ball). NaN when there is no carrier. The [EventType.Down]
+     * event reports it; the game spots the ball there.
+     */
+    var forwardProgressX: Double = Double.NaN
+        private set
+
+    /** The body holding the ball, or null. */
+    val ballCarrier: BodyId? get() = carrier?.let { BodyId(it.id) }
+
+    /**
+     * Gives the ball to [id] (a dynamic body), or takes it away with null. Possession is the game's call. Tracking
+     * restarts from the new carrier's current x.
+     */
+    fun setBallCarrier(id: BodyId?) {
+        if (id == null) {
+            carrier = null
+            forwardProgressX = Double.NaN
+        } else {
+            val b = live(id)
+            require(b.type == BodyType.Dynamic) { "The ball carrier must be dynamic: body ${id.value} is ${b.type}" }
+            carrier = b
+            forwardProgressX = b.x
+        }
+        recorder?.onSetBallCarrier(tick, id)
+    }
+
+    /** Sets which way the offense attacks (+1 or −1). Tracking restarts from the carrier's current x. */
+    fun setAttackDirection(direction: Int) {
+        require(direction == 1 || direction == -1) { "attack direction must be +1 or -1: $direction" }
+        attackDirection = direction
+        val c = carrier
+        if (c != null) forwardProgressX = c.x
+        recorder?.onSetAttackDirection(tick, direction)
     }
 
     // ---------------------------------------------------------------- events
@@ -393,13 +589,16 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
 
     /** Advances exactly one 1/60 s tick, running the spec's ten phases in order. */
     fun step() {
+        wakeJointBodies()
         applyIntents()
+        applyJointForces()
         integrateVelocities()
         broadPhase()
         narrowPhase()
         solveVelocities()
         integratePositions()
         relax()
+        breakJoints()
         ballFlight()
         emitEvents()
         bookkeeping()
@@ -418,6 +617,23 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
                 val e = eventReader.add(EventReader.T_SLIP, tick + 1, b.id)
                 eventReader.setDouble(e, EventReader.D_VALUE, c.slip)
             }
+        }
+    }
+
+    /** A joint with a moving body wakes its other body; an engaged block keeps both awake. Drag starts each tick at zero. */
+    private fun wakeJointBodies() {
+        for (k in 0 until jointHighWater) {
+            val j = joints[k] ?: continue
+            j.beginTick()
+            if (j.type == JointType.Block || j.a.active || j.b.active) { wake(j.a); wake(j.b) }
+        }
+    }
+
+    /** Block pushes (ground reaction through each player's feet), in joint id order, on top of locomotion. */
+    private fun applyJointForces() {
+        for (k in 0 until jointHighWater) {
+            val j = joints[k] ?: continue
+            if (j.type == JointType.Block) j.applyPushes()
         }
     }
 
@@ -527,8 +743,16 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
         for (i in 0 until oldContactCount) { oldContacts[i].a = null; oldContacts[i].b = null }
     }
 
-    /** Prepares every contact, applies the warm-start impulses, then runs the velocity iterations with soft bias. */
+    /**
+     * Prepares every joint and contact, applies the warm-start impulses, then runs the velocity iterations with soft
+     * bias: joints first (in id order), then contacts.
+     */
     private fun solveVelocities() {
+        for (k in 0 until jointHighWater) {
+            val j = joints[k] ?: continue
+            j.prepare()
+            j.warmStart()
+        }
         for (i in 0 until contactCount) {
             val c = contacts[i]
             val a = c.a!!; val b = c.b!!
@@ -561,6 +785,7 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
             }
         }
         for (it in 0 until config.velocityIterations) {
+            for (k in 0 until jointHighWater) joints[k]?.solveVelocity(rigidJoint, false)
             for (i in 0 until contactCount) if (contacts[i].solve) solveContact(contacts[i], true)
         }
     }
@@ -648,7 +873,9 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
 
     /** Rigid (unbiased) iterations that remove push-out velocity, then restitution against pre-solve closing speed. */
     private fun relax() {
+        for (k in 0 until jointHighWater) joints[k]?.prepare()
         for (it in 0 until config.relaxIterations) {
+            for (k in 0 until jointHighWater) joints[k]?.solveVelocity(rigidJoint, true)
             for (i in 0 until contactCount) if (contacts[i].solve) solveContact(contacts[i], false)
         }
         val threshold = config.restitutionThreshold
@@ -672,6 +899,24 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
                 if (impulse > c.maxNormalImpulse[j]) c.maxNormalImpulse[j] = impulse
                 applyImpulse(a, b, rAx, rAy, rBx, rBy, impulse * nx, impulse * ny)
             }
+        }
+    }
+
+    /**
+     * After the solver: a grapple whose pull reached its break force, or a block that took its shed threshold to hold
+     * squared up, gives way within the tick. Joint id order; these events come before the contact events.
+     */
+    private fun breakJoints() {
+        val t = tick + 1
+        for (k in 0 until jointHighWater) {
+            val j = joints[k] ?: continue
+            if (!j.checkBreak()) continue
+            val grapple = j.type == JointType.Grapple
+            val e = eventReader.add(if (grapple) EventReader.T_GRAPPLE_BROKEN else EventReader.T_BLOCK_SHED, t, j.a.id)
+            eventReader.setInt(e, EventReader.I_B, j.b.id)
+            eventReader.setInt(e, EventReader.I_JOINT, j.id)
+            eventReader.setDouble(e, EventReader.D_VALUE, if (grapple) j.force() else j.lateralForce())
+            removeJoint(j)
         }
     }
 
@@ -705,6 +950,8 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
             val b = bodies[i] ?: continue
             if (b.type != BodyType.Static) b.geom.set(b.shape, b.x, b.y, b.angle)
         }
+        val c = carrier
+        if (c != null && c.stance == Stance.Upright && attackDirection * (c.x - forwardProgressX) > 0.0) forwardProgressX = c.x
         emitContactEvents()
         emitLineEvents()
     }
@@ -950,6 +1197,23 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
             val c = contacts[k]
             if (c.sensor) continue
             val a = c.a!!; val b = c.b!!
+            val aLive = a.type == BodyType.Dynamic && a.awake
+            val bLive = b.type == BodyType.Dynamic && b.awake
+            if (aLive && bLive) {
+                val ra = islandRoot(BodyId(a.id).slot)
+                val rb = islandRoot(BodyId(b.id).slot)
+                if (ra < rb) islandParent[rb] = ra else if (rb < ra) islandParent[ra] = rb
+            } else if (aLive && b.type == BodyType.Kinematic && b.active) {
+                a.sleepTime = 0.0
+            } else if (bLive && a.type == BodyType.Kinematic && a.active) {
+                b.sleepTime = 0.0
+            }
+        }
+        // Jointed bodies share an island too; an engaged block never sleeps.
+        for (k in 0 until jointHighWater) {
+            val j = joints[k] ?: continue
+            val a = j.a; val b = j.b
+            if (j.type == JointType.Block) { a.sleepTime = 0.0; b.sleepTime = 0.0 }
             val aLive = a.type == BodyType.Dynamic && a.awake
             val bLive = b.type == BodyType.Dynamic && b.awake
             if (aLive && bLive) {

@@ -35,6 +35,24 @@ class EventOverlayTest {
         assertTrue(s.markers.none { it.type == EventType.ContactBegin || it.type == EventType.ContactEnd }, "too many to draw")
     }
 
+    @Test fun jointScenariosMarkBreaksAndShedsAndListTheirJoints() {
+        for ((sc, kind) in listOf(Scenarios.tackleWithGrapple to EventType.GrappleBroken, Scenarios.doubleTeam to EventType.BlockShed)) {
+            val s = ViewerState(sc)
+            assertTrue(s.jointCount == 3, "${sc.name} starts with 3 joints: ${s.jointCount}")
+            val seen = HashSet<EventType>()
+            repeat(120) { s.frame(1.0 / 60); s.markers.forEach { seen += it.type } }
+            assertTrue(kind in seen, "${sc.name}: no $kind marker in $seen")
+            assertEquals(2, s.jointCount, "${sc.name}: one joint gave way, two hold")
+        }
+    }
+
+    @Test fun loadColorRunsFromGreenToRed() {
+        val idle = loadColor(0.0); val strained = loadColor(1.0); val over = loadColor(3.0)
+        assertTrue(idle.green > idle.red, "no load is green")
+        assertTrue(strained.red > 0.9f && strained.green < 0.2f, "at the limit it is red")
+        assertEquals(strained, over, "clamped past the limit")
+    }
+
     @Test fun steppingWhilePausedAlsoCollectsEvents() {
         val s = ViewerState(Scenarios.eventLab)
         s.paused = true
