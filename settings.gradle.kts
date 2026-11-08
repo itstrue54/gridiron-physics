@@ -19,3 +19,4 @@ dependencyResolutionManagement {
 rootProject.name = "gridiron-physics"
 include(":physics-core")
 include(":physics-scenarios")
+include(":physics-debug")
