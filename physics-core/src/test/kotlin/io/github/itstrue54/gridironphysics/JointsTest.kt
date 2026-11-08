@@ -401,6 +401,10 @@ class JointsTest {
             override fun onDestroyJoint(tick: Long, id: JointId) { log += "x:${id.value}@$tick" }
             override fun onSetBallCarrier(tick: Long, id: BodyId?) { log += "c:${id?.value}@$tick" }
             override fun onSetAttackDirection(tick: Long, direction: Int) { log += "dir:$direction@$tick" }
+            override fun onLaunchBall(tick: Long, from: io.github.itstrue54.gridironphysics.math.Vec3, velocity: io.github.itstrue54.gridironphysics.math.Vec3, mode: FlightMode) {}
+            override fun onDeflect(tick: Long, id: BodyId, impulseX: Double, impulseY: Double, impulseZ: Double) {}
+            override fun onSetWind(tick: Long, x: Double, y: Double) {}
+            override fun onSetReach(tick: Long, id: BodyId, reachRadius: Double, reachHeight: Double) {}
         }
         val a = ghost(w, 50.0); val b = ghost(w, 51.0)
         val g = w.createGrapple(a, b, GrappleDef(breakForce = 9.0))

@@ -1,5 +1,6 @@
 package io.github.itstrue54.gridironphysics.debug
 
+import io.github.itstrue54.gridironphysics.BallState
 import io.github.itstrue54.gridironphysics.BodyId
 import io.github.itstrue54.gridironphysics.BodyType
 import io.github.itstrue54.gridironphysics.ContactView
@@ -8,6 +9,9 @@ import io.github.itstrue54.gridironphysics.FieldLine
 import io.github.itstrue54.gridironphysics.World
 import io.github.itstrue54.gridironphysics.scenarios.Scenario
 import io.github.itstrue54.gridironphysics.scenarios.Scenarios
+
+/** A point the ball passed through (z is its height), for the trail. */
+class TrailPoint(val x: Double, val y: Double, val z: Double)
 
 /** One event drawn on the field for [ViewerState.MARKER_TICKS] ticks. */
 class EventMarker(val type: EventType, val tick: Long, val x: Double, val y: Double, val label: String, val pair: Long = 0L)
@@ -54,11 +58,20 @@ class ViewerState(scenario: Scenario = Scenarios.all.first()) {
     /** Last tick each body slipped, so the log shows where a slip starts instead of one line per tick. */
     private val lastSlip = HashMap<Int, Long>()
 
+    /** Where the ball has been since its latest launch (in the air, bouncing and rolling), oldest first. */
+    val ballTrail: List<TrailPoint> get() = trail
+    private val trail = ArrayList<TrailPoint>()
+    private var trailTick = -1L
+    private var lastBallState = BallState.Dead
+
     fun reset() {
         world = scenario.build()
         markerList.clear()
         logList.clear()
         lastSlip.clear()
+        trail.clear()
+        trailTick = -1L
+        lastBallState = BallState.Dead
         selected = null
         alpha = 0.0
         follow = true
@@ -108,6 +121,11 @@ class ViewerState(scenario: Scenario = Scenarios.all.first()) {
             x0 = minOf(x0, b.x - r); y0 = minOf(y0, b.y - r)
             x1 = maxOf(x1, b.x + r); y1 = maxOf(y1, b.y + r)
         }
+        val ball = world.ball()
+        if (ball.state != BallState.Dead) {
+            x0 = minOf(x0, ball.x - BALL_PAD_M); y0 = minOf(y0, ball.y - BALL_PAD_M)
+            x1 = maxOf(x1, ball.x + BALL_PAD_M); y1 = maxOf(y1, ball.y + BALL_PAD_M)
+        }
         if (x0 > x1) return ViewRect.wholeWorld(world.field)
         val cx = (x0 + x1) / 2; val cy = (y0 + y1) / 2
         val hw = maxOf((x1 - x0) / 2 + PAD_M, MIN_VIEW_M / 2)
@@ -127,6 +145,12 @@ class ViewerState(scenario: Scenario = Scenarios.all.first()) {
 
         /** Lines in the event log. */
         const val LOG_SIZE = 14
+
+        /** Extra room around the ball in the follow window (m), so its lifted drawing and label stay on screen. */
+        const val BALL_PAD_M = 3.0
+
+        /** Points kept in the ball trail (8 s). */
+        const val TRAIL_SIZE = 480
 
         private val LINE_NAMES = arrayOf("near sideline", "far sideline", "home end line", "away end line", "home goal line", "away goal line")
 
@@ -148,8 +172,24 @@ class ViewerState(scenario: Scenario = Scenarios.all.first()) {
         collectEvents()
     }
 
+    /** Adds the ball's position after each new tick to the trail; a new flight from a hand or a dead ball starts a new trail. */
+    private fun recordBall() {
+        val b = world.ball()
+        val st = b.state
+        if (st == BallState.Airborne && (lastBallState == BallState.Dead || lastBallState == BallState.Carried)) trail.clear()
+        if (world.tick == 0L && trail.isEmpty() && st == BallState.Airborne) trail.add(TrailPoint(b.prevX, b.prevY, b.prevZ))
+        lastBallState = st
+        if (world.tick == trailTick) return
+        trailTick = world.tick
+        if (st == BallState.Airborne || st == BallState.Loose) {
+            trail.add(TrailPoint(b.x, b.y, b.z))
+            if (trail.size > TRAIL_SIZE) trail.removeAt(0)
+        }
+    }
+
     /** Drains the world's events into markers and the log, and drops markers older than [MARKER_TICKS]. */
     private fun collectEvents() {
+        recordBall()
         val r = world.events()
         while (r.next()) {
             val type = r.type
@@ -167,6 +207,9 @@ class ViewerState(scenario: Scenario = Scenarios.all.first()) {
                 EventType.GrappleBroken -> "GRAPPLE BROKEN %.0f N".format(r.force)
                 EventType.BlockShed -> "BLOCK SHED %.0f N".format(r.force)
                 EventType.Down -> if (r.ballCarrier) "DOWN, spot x = %.2f m".format(r.forwardProgressX) else "down"
+                EventType.BallBounce -> "bounce %.1f m/s".format(r.speed)
+                EventType.KickResult -> "KICK " + r.kickResult.name + " (z %.1f m)".format(r.pointZ)
+                EventType.CatchOpportunity -> "CATCH CHANCE %.1f m/s, z %.1f m".format(r.speed, r.pointZ)
                 EventType.ContactBegin, EventType.ContactEnd -> {
                     mark = false
                     val other = if (r.wall != ContactView.NO_WALL) "wall " + r.wall else "#" + r.bodyB.value
@@ -177,9 +220,14 @@ class ViewerState(scenario: Scenario = Scenarios.all.first()) {
             if (!slipGoesOn) logList.add(0, "" + r.tick + "  #" + r.bodyA.value + "  " + text)
             if (logList.size > LOG_SIZE) logList.removeAt(logList.size - 1)
             if (!mark) continue
-            if (type == EventType.Slip || type == EventType.OutOfBounds || type == EventType.SensorBegin || type == EventType.Down) {
-                val b = world.body(r.bodyA)
-                x = b.x; y = b.y
+            // Ring the player for a catch chance, not the ball; mark line events where the body is now.
+            if (type == EventType.CatchOpportunity || type == EventType.Slip || type == EventType.OutOfBounds || type == EventType.SensorBegin || type == EventType.Down) {
+                if (r.bodyA == world.ballId && world.ball().state != BallState.Loose) {
+                    x = world.ball().x; y = world.ball().y // the ball left the ground again since
+                } else {
+                    val b = world.body(r.bodyA)
+                    x = b.x; y = b.y
+                }
             }
             if (type == EventType.GrappleBroken || type == EventType.BlockShed) {
                 // Where the joint was: midway between its bodies.
@@ -208,12 +256,14 @@ class ViewerState(scenario: Scenario = Scenarios.all.first()) {
     fun ids(): IntArray = idBuf
     val count: Int get() = world.bodyIds(idBuf)
 
-    /** The body whose circle contains the world point, nearest center first, or null. */
+    /** The body whose circle contains the world point, nearest center first, or null. Never the ball. */
     fun pick(wx: Double, wy: Double): BodyId? {
         var best: BodyId? = null
         var bestD2 = Double.MAX_VALUE
         val n = count
         for (i in 0 until n) {
+            // Not the loose ball: it stops being a body when it leaves the ground (the panel shows it separately).
+            if (idBuf[i] == world.ballId.value) continue
             val b = world.body(BodyId(idBuf[i]))
             val dx = b.x - wx
             val dy = b.y - wy

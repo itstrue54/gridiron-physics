@@ -73,6 +73,28 @@ enum class EventType {
      * carrier also [EventReader.forwardProgressX], where the game spots the ball.
      */
     Down,
+
+    /**
+     * The ball in the air reached the ground (each bounce). Sets bodyA ([World.ballId]), the point (pointZ 0) and
+     * [EventReader.speed] (impact speed, m/s). Read [World.ball] for whether it bounced back up or rolls on as Loose.
+     */
+    BallBounce,
+
+    /**
+     * The ball in the air crossed an end-line plane (Good, WideLeft, WideRight, Short) or touched the goal posts
+     * (HitPost; it then bounces off and may cross the plane later for a second KickResult). Sets bodyA
+     * ([World.ballId]), [EventReader.kickResult], line (the end line), the point (x, y) and [EventReader.pointZ]. Every
+     * flight reports these, pass or kick: the game decides what was a kick.
+     */
+    KickResult,
+
+    /**
+     * The ball in the air came within a player's reach ([World.setReach]): between [BallConfig.catchMinHeight] and his
+     * reach height, within his reach radius of his center. Emitted once each time it enters his window, players in id
+     * order. Sets bodyA (the player), the ball's point and [EventReader.pointZ], [EventReader.speed] (ball speed),
+     * [EventReader.arrivalAngle] and [EventReader.descentAngle]. The game decides the catch ([World.setBallCarrier]).
+     */
+    CatchOpportunity,
 }
 
 /**
@@ -206,8 +228,31 @@ class EventReader internal constructor(capacity: Int) {
     /** Slip: acceleration (m/s²) the intent asked for beyond the traction limit. */
     val slipExcess: Double get() = doubles[slot() * DOUBLES + D_VALUE]
 
-    /** Trip: the moving player's speed just before the contact (m/s). */
+    /**
+     * Trip: the moving player's speed just before the contact (m/s). BallBounce: the ball's impact speed.
+     * CatchOpportunity: the ball's speed.
+     */
     val speed: Double get() = doubles[slot() * DOUBLES + D_VALUE]
+
+    /** Ball events: the ball's height (m). */
+    val pointZ: Double get() = doubles[slot() * DOUBLES + D_PZ]
+
+    /** KickResult: what the ball did at the end line or the posts. Throws for other events. */
+    val kickResult: KickResult
+        get() {
+            val s = slot()
+            check(types[s] == T_KICK_RESULT) { "${TYPES[types[s]]} has no kickResult" }
+            return KICKS[ints[s * INTS + I_KICK]]
+        }
+
+    /**
+     * CatchOpportunity: the ball's direction of travel (on the ground plane) relative to the player's heading (rad, in
+     * (−π, π]): 0 = the ball travels the way he faces (over his shoulder), ±π = it comes at his face.
+     */
+    val arrivalAngle: Double get() = doubles[slot() * DOUBLES + D_ANGLE_A]
+
+    /** CatchOpportunity: how steeply the ball comes down (rad): 0 = level, positive = descending. */
+    val descentAngle: Double get() = doubles[slot() * DOUBLES + D_ANGLE_B]
 
     /** GrappleBroken and BlockShed: the joint that broke. Throws for other events. */
     val joint: JointId
@@ -246,7 +291,7 @@ class EventReader internal constructor(capacity: Int) {
         val i = s * INTS
         ints[i + I_A] = a; ints[i + I_B] = 0; ints[i + I_WALL] = ContactView.NO_WALL
         ints[i + I_LINE] = FieldLine.NONE; ints[i + I_DIR] = 0; ints[i + I_SENSOR] = 0
-        ints[i + I_JOINT] = -1; ints[i + I_CARRIER] = 0
+        ints[i + I_JOINT] = -1; ints[i + I_CARRIER] = 0; ints[i + I_KICK] = 0
         val d = s * DOUBLES
         for (k in 0 until DOUBLES) doubles[d + k] = 0.0
         return s
@@ -269,8 +314,12 @@ class EventReader internal constructor(capacity: Int) {
         val T_GRAPPLE_BROKEN = EventType.GrappleBroken.ordinal
         val T_BLOCK_SHED = EventType.BlockShed.ordinal
         val T_DOWN = EventType.Down.ordinal
+        val T_BALL_BOUNCE = EventType.BallBounce.ordinal
+        val T_KICK_RESULT = EventType.KickResult.ordinal
+        val T_CATCH = EventType.CatchOpportunity.ordinal
+        val KICKS = KickResult.values()
 
-        const val INTS = 8
+        const val INTS = 9
         const val I_A = 0
         const val I_B = 1
         const val I_WALL = 2
@@ -279,8 +328,9 @@ class EventReader internal constructor(capacity: Int) {
         const val I_SENSOR = 5
         const val I_JOINT = 6
         const val I_CARRIER = 7
+        const val I_KICK = 8
 
-        const val DOUBLES = 13
+        const val DOUBLES = 14
         const val D_PX = 0
         const val D_PY = 1
         const val D_NX = 2
@@ -294,5 +344,6 @@ class EventReader internal constructor(capacity: Int) {
         const val D_MBX = 10
         const val D_MBY = 11
         const val D_VALUE = 12
+        const val D_PZ = 13
     }
 }

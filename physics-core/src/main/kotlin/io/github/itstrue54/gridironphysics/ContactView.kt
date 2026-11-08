@@ -21,7 +21,7 @@ class ContactView internal constructor() {
             return BodyId(contact.idB)
         }
 
-    /** [NO_WALL], or which runoff wall B is. */
+    /** [NO_WALL], or which engine-owned static B is: a runoff wall or a goal-post base ([POST_HOME], [POST_AWAY]). */
     val wall: Int get() = contact.wall
 
     /** Sensor contacts report overlap and never push (sensor shapes, ball against player). */
@@ -67,5 +67,11 @@ class ContactView internal constructor() {
 
         /** Wall along x = length + runoff. */
         const val WALL_AWAY = 3
+
+        /** The padded goal-post base behind the home end line (x < 0). Present when [WorldConfig.goalPosts] is on. */
+        const val POST_HOME = 4
+
+        /** The padded goal-post base behind the away end line. */
+        const val POST_AWAY = 5
     }
 }

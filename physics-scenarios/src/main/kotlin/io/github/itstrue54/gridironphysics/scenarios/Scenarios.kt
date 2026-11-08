@@ -7,13 +7,109 @@ import io.github.itstrue54.gridironphysics.GrappleDef
 import io.github.itstrue54.gridironphysics.LocomotionIntent
 import io.github.itstrue54.gridironphysics.BodyType
 import io.github.itstrue54.gridironphysics.Category
+import io.github.itstrue54.gridironphysics.FlightMode
 import io.github.itstrue54.gridironphysics.Material
 import io.github.itstrue54.gridironphysics.ShapeDef
 import io.github.itstrue54.gridironphysics.Stance
 import io.github.itstrue54.gridironphysics.math.DMath
+import io.github.itstrue54.gridironphysics.math.Vec3
 
-/** Every scenario, in the order the viewer lists them. Later milestones add the spec's other setups. */
+/** Every scenario, in the order the viewer lists them (newest milestone first). */
 object Scenarios {
+
+    private const val YARD = 0.9144
+
+    /**
+     * M6: a go route down the near sideline in a crosswind blowing toward that sideline (and a little into the
+     * passer's face). The receiver is already at full speed with a corner trailing him; the quarterback throws a 13 m
+     * high spiral led to where the receiver will be, solved against the drag and the wind, so the ball starts out over
+     * the field and drifts back onto him. Both players have catch windows: the viewer marks each CatchOpportunity.
+     * Nobody decides the catch here, so the ball comes down past the receiver and bounces.
+     */
+    val deepPass = scenario(
+        name = "Deep pass to the sideline with wind",
+        description = "A led 13 m spiral to a go route on the near sideline, aimed upwind against a 5 m/s crosswind (M6)",
+        seed = 29L,
+    ) {
+        val wr = AthleteParams(maxSpeed = 9.2, maxAccel = 8.0, maxDecel = 8.5, turnRateAtRest = 12.0, turnRateAtMax = 2.5)
+        val cb = AthleteParams(maxSpeed = 9.0, maxAccel = 8.0, maxDecel = 8.5, turnRateAtRest = 12.0, turnRateAtMax = 2.5)
+        val los = field.homeGoalLineX + 25 * YARD
+        world.setWind(-1.5, -5.0)
+        val qb = athlete(los - 7 * YARD, field.nearHashY, 100.0, 0.34, Tags.HOME, wr, LocomotionIntent.velocity(0.0, 0.0))
+        val receiver = athlete(los + 6.0, 4.0, 88.0, 0.32, Tags.HOME, wr, LocomotionIntent.velocity(9.0, 0.0), vx = 9.0)
+        val corner = athlete(los + 4.5, 5.5, 86.0, 0.32, Tags.AWAY, cb, LocomotionIntent.velocity(8.8, -0.2), vx = 8.8)
+        world.setReach(receiver, 1.0, 2.6)
+        world.setReach(corner, 1.0, 2.6)
+        // Lead him: guess the flight time, aim at where he will be then, re-time the solved throw, repeat.
+        val q = world.body(qb)
+        val from = Vec3(q.x + 0.3, q.y, 1.9)
+        val r = world.body(receiver)
+        val rx = r.x; val ry = r.y
+        val target = Vec3()
+        val v = Vec3()
+        var t = 2.5
+        repeat(8) {
+            target.set(rx + 9.0 * t, ry, 1.5)
+            world.launchVelocityFor(from, target, 13.0, FlightMode.Spiral, v)
+            t = world.timeToArrive(from, v, FlightMode.Spiral, target)
+        }
+        world.launchBall(from, v, FlightMode.Spiral)
+    }
+
+    /**
+     * M6: a punt from midfield aimed at the away 5-yard line, end over end with 4.5 s of hang time. It lands inside
+     * the 10, bounces with the seeded ±35° yaw of a prolate ball and rolls on as the loose ball toward the goal line
+     * while two gunners close in and the returner stays back.
+     */
+    val punt = scenario(
+        name = "Punt that bounces near the goal line",
+        description = "A 50-yard punt with 4.5 s hang time lands inside the 10 and bounces toward the goal line (M6)",
+        seed = 31L,
+    ) {
+        val gunner = AthleteParams(maxSpeed = 9.3, maxAccel = 8.0, maxDecel = 8.5, turnRateAtRest = 12.0, turnRateAtMax = 2.5)
+        val cy = field.widthM / 2
+        val target = Vec3(field.awayGoalLineX - 5 * YARD, cy + 5.0, 0.0)
+        val punter = player(field.midfieldX - 14 * YARD, cy, mass = 95.0, radius = 0.33, damping = 2.0)
+        val p = world.body(punter)
+        // Gunners already running at 7 m/s straight for a spot short of the landing, one from each sideline.
+        fun gunnerAt(y: Double, ty: Double) {
+            val x = field.midfieldX + 2.0
+            val gx = target.x - 3.0
+            val d = DMath.hypot2(gx - x, ty - y)
+            athlete(x, y, 90.0, 0.32, Tags.HOME, gunner, LocomotionIntent.point(gx, ty), vx = 7.0 * (gx - x) / d, vy = 7.0 * (ty - y) / d)
+        }
+        gunnerAt(3.5, target.y - 3.0)
+        gunnerAt(field.widthM - 3.5, target.y + 3.0)
+        player(field.awayGoalLineX - 12 * YARD, cy - 8.0, mass = 92.0, radius = 0.32, damping = 2.0, tag = Tags.AWAY)
+        val from = Vec3(p.x + 0.5, p.y, 1.0)
+        val v = world.launchVelocityFor(from, target, 25.0, FlightMode.EndOverEnd, Vec3())
+        world.launchBall(from, v, FlightMode.EndOverEnd)
+    }
+
+    /**
+     * M6: a 45-yard field goal (snap 7 yards behind a line at the 28) that comes off the left upright: the kick is
+     * solved at 27 m/s end over end straight at the upright 7 m up, so it clangs off it (KickResult HitPost) and falls
+     * back toward the end zone. Holder, kicker and a few linemen stand for scale.
+     */
+    val fieldGoal = scenario(
+        name = "45-yard field goal that hits the upright",
+        description = "A 27 m/s end-over-end kick from 45 yards clangs off the left upright: KickResult HitPost (M6)",
+        seed = 37L,
+    ) {
+        val cy = field.widthM / 2
+        val spotX = field.lengthM - 45 * YARD
+        val spotY = cy - 1.5
+        player(spotX - 0.6, spotY - 0.9, mass = 90.0, radius = 0.32, damping = 3.0) // holder
+        player(spotX - 2.4, spotY - 1.6, mass = 88.0, radius = 0.32, damping = 3.0) // kicker
+        for (k in -3..3) player(spotX + 6.4, spotY + 0.9 * k, mass = 140.0, radius = 0.37, damping = 3.0)
+        for (k in -2..2) player(spotX + 7.4, spotY + 1.1 * k, mass = 135.0, radius = 0.37, damping = 3.0, tag = Tags.AWAY)
+        val from = Vec3(spotX, spotY, 0.0)
+        // The left upright (kicker's left, +y going toward +x), a few centimetres inside its axis.
+        val target = Vec3(field.lengthM, cy + field.uprightSpacingM / 2 - 0.04, 7.0)
+        val v = Vec3()
+        check(world.launchVelocityFor(from, target, 27.0, false, FlightMode.EndOverEnd, v)) { "45 yards is in range at 27 m/s" }
+        world.launchBall(from, v, FlightMode.EndOverEnd)
+    }
 
     /**
      * M5: two wrap-ups at once. A 95 kg carrier at 8 m/s keeps driving downfield with two tacklers wrapped on him
@@ -259,7 +355,7 @@ object Scenarios {
         prop(x = field.homeGoalLineX, y = field.widthM / 2, radius = 0.5)
     }
 
-    val all: List<Scenario> = listOf(tackleWithGrapple, doubleTeam, headOnTackle, sidelineRun, eventLab, contactLab, drift)
+    val all: List<Scenario> = listOf(deepPass, punt, fieldGoal, tackleWithGrapple, doubleTeam, headOnTackle, sidelineRun, eventLab, contactLab, drift)
 
     /** Angular damping for coasting bodies (no locomotion holds their heading). */
     private const val SPIN_DAMPING = 8.0

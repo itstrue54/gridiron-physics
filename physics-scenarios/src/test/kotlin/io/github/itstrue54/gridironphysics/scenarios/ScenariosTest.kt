@@ -385,6 +385,77 @@ class ScenariosTest {
         }
     }
 
+    // ------------------------------------------------------------ M6: ball flight
+
+    private class BallEv(val type: EventType, val tick: Long, val a: Int, val x: Double, val y: Double, val z: Double, val kick: io.github.itstrue54.gridironphysics.KickResult?)
+
+    private fun ballEvents(w: World, ticks: Int): List<BallEv> {
+        val out = ArrayList<BallEv>()
+        repeat(ticks) {
+            w.step()
+            val r = w.events()
+            while (r.next()) {
+                if (r.type == EventType.BallBounce || r.type == EventType.KickResult || r.type == EventType.CatchOpportunity) {
+                    out += BallEv(r.type, r.tick, r.bodyA.value, r.pointX, r.pointY, r.pointZ, if (r.type == EventType.KickResult) r.kickResult else null)
+                }
+            }
+        }
+        return out
+    }
+
+    @Test fun deepPassLeadsTheReceiverDownTheSidelineThroughTheWind() {
+        val w = Scenarios.deepPass.build()
+        assertTrue(DMath.hypot2(w.windX, w.windY) >= 4.0, "a real wind: (${w.windX}, ${w.windY})")
+        assertEquals(io.github.itstrue54.gridironphysics.BallState.Airborne, w.ball().state)
+        val x0 = w.ball().x; val y0 = w.ball().y
+        val receiver = ids(w).single { w.body(it).userData == Tags.HOME && w.body(it).y < 8.0 }
+        val ev = ballEvents(w, 300)
+        val chance = ev.first { it.type == EventType.CatchOpportunity }
+        assertEquals(receiver.value, chance.a, "the receiver gets the first chance")
+        assertTrue(DMath.hypot2(chance.x - x0, chance.y - y0) > 30.0, "a deep pass")
+        assertTrue(chance.y in 0.0..8.0, "near the sideline, in bounds: y ${chance.y}")
+        // The solver aimed upwind: in calm air the same throw would come down inside the field of where it does.
+        val sim = Scenarios.deepPass.build()
+        val b = sim.ball()
+        val from = io.github.itstrue54.gridironphysics.math.Vec3(b.x, b.y, b.z)
+        val v = io.github.itstrue54.gridironphysics.math.Vec3(b.vx, b.vy, b.vz)
+        val windy = io.github.itstrue54.gridironphysics.math.Vec3(); val calm = io.github.itstrue54.gridironphysics.math.Vec3()
+        sim.predictLanding(from, v, b.flightMode, windy)
+        sim.setWind(0.0, 0.0)
+        sim.predictLanding(from, v, b.flightMode, calm)
+        assertTrue(calm.y - windy.y > 0.5, "wind drift toward the sideline: calm y ${calm.y} vs windy y ${windy.y}")
+    }
+
+    @Test fun puntBouncesNearTheGoalLineAndEndsUpLoose() {
+        val w = Scenarios.punt.build()
+        val f = w.field
+        val ev = ballEvents(w, 600)
+        val bounces = ev.filter { it.type == EventType.BallBounce }
+        assertTrue(bounces.size >= 2, "it bounces: ${bounces.size}")
+        val first = bounces.first()
+        assertTrue(first.x in (f.awayGoalLineX - 9.144)..f.awayGoalLineX, "first bounce inside the 10: x ${first.x} (goal line ${f.awayGoalLineX})")
+        assertEquals(io.github.itstrue54.gridironphysics.BallState.Loose, w.ball().state)
+    }
+
+    @Test fun fieldGoalFrom45YardsHitsTheUpright() {
+        val w = Scenarios.fieldGoal.build()
+        val f = w.field
+        val spot = w.ball().x
+        assertEquals(45.0 * 0.9144, f.lengthM - spot, 0.5, "45 yards from the posts")
+        val ev = ballEvents(w, 300)
+        val kick = ev.filter { it.type == EventType.KickResult }
+        assertEquals(io.github.itstrue54.gridironphysics.KickResult.HitPost, kick.first().kick, "kick results: ${kick.map { it.kick }}")
+        assertTrue(kick.first().z > f.crossbarHeightM, "the upright, above the bar: z ${kick.first().z}")
+        assertTrue(DMath.abs(DMath.abs(kick.first().y - f.widthM / 2) - f.uprightSpacingM / 2) < 0.3, "at an upright: y ${kick.first().y}")
+    }
+
+    @Test fun ballScenariosAreDeterministic() {
+        for (s in listOf(Scenarios.deepPass, Scenarios.punt, Scenarios.fieldGoal)) {
+            fun run(): List<Long> { val w = s.build(); return (0 until 360).map { w.step(); w.stateHash() } }
+            assertEquals(run(), run(), s.name)
+        }
+    }
+
     @Test fun registryListsDrift() {
         assertTrue(Scenarios.drift in Scenarios.all)
         assertTrue(Scenarios.sidelineRun in Scenarios.all)
@@ -393,6 +464,9 @@ class ScenariosTest {
         assertTrue(Scenarios.eventLab in Scenarios.all)
         assertTrue(Scenarios.tackleWithGrapple in Scenarios.all)
         assertTrue(Scenarios.doubleTeam in Scenarios.all)
+        assertTrue(Scenarios.deepPass in Scenarios.all)
+        assertTrue(Scenarios.punt in Scenarios.all)
+        assertTrue(Scenarios.fieldGoal in Scenarios.all)
         assertEquals(Scenarios.all.size, Scenarios.all.map { it.name }.toSet().size, "scenario names are unique")
     }
 }

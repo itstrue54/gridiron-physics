@@ -34,6 +34,13 @@ data class WorldConfig(
     /** Softness of rigid joint rows (distance and weld with hertz 0) while solving velocities, as in Box2D v3. */
     val jointHertz: Double = 60.0,
     val jointDampingRatio: Double = 2.0,
+    /** The ball: mass, size, drag per flight mode, bounces, catch and carry heights. */
+    val ball: BallConfig = BallConfig(),
+    /**
+     * The two goal-post assemblies ([FieldConfig]): 3D uprights, crossbar and gooseneck for the ball in the air, plus a
+     * padded base behind each end line that players and the loose ball collide with.
+     */
+    val goalPosts: Boolean = true,
 ) {
     init {
         require(maxBodies > 0) { "maxBodies must be > 0" }

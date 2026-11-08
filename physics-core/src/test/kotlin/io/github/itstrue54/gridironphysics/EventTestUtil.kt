@@ -27,6 +27,10 @@ data class Ev(
     val joint: Int = -1,
     /** Down: true when the body is the ball carrier. */
     val ballCarrier: Boolean = false,
+    /** KickResult: the result; else null. */
+    val kick: KickResult? = null,
+    /** Ball events: the ball's height. */
+    val pz: Double = 0.0,
 )
 
 private val PAIR_TYPES = setOf(EventType.ContactBegin, EventType.ContactEnd, EventType.Hit, EventType.Trip, EventType.GrappleBroken, EventType.BlockShed)
@@ -45,6 +49,8 @@ fun World.drain(): List<Ev> {
             r.slipExcess,
             if (r.type in JOINT_TYPES) r.joint.value else -1,
             r.type == EventType.Down && r.ballCarrier,
+            if (r.type == EventType.KickResult) r.kickResult else null,
+            r.pointZ,
         )
     }
     return out

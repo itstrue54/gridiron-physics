@@ -73,6 +73,13 @@ internal class Body(
     /** True once the shape touched a sideline or end line; false again when it is fully in bounds. */
     @JvmField var outOfBounds = false
 
+    /** Catch window (World.setReach): radius and top height; 0 = none. */
+    @JvmField var reachRadius = 0.0
+    @JvmField var reachHeight = 0.0
+
+    /** The ball in the air was inside this body's catch window at the end of the last step. */
+    @JvmField var inCatch = false
+
     /** Set by World.setAthlete; null for bodies without locomotion. */
     @JvmField var loco: LocomotionController? = null
 

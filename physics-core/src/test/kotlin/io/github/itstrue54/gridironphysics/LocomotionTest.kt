@@ -382,6 +382,10 @@ class LocomotionTest {
             override fun onDestroyJoint(tick: Long, id: JointId) {}
             override fun onSetBallCarrier(tick: Long, id: BodyId?) {}
             override fun onSetAttackDirection(tick: Long, direction: Int) {}
+            override fun onLaunchBall(tick: Long, from: io.github.itstrue54.gridironphysics.math.Vec3, velocity: io.github.itstrue54.gridironphysics.math.Vec3, mode: FlightMode) {}
+            override fun onDeflect(tick: Long, id: BodyId, impulseX: Double, impulseY: Double, impulseZ: Double) {}
+            override fun onSetWind(tick: Long, x: Double, y: Double) {}
+            override fun onSetReach(tick: Long, id: BodyId, reachRadius: Double, reachHeight: Double) {}
         }
         val p = w.createBody(BodyDef())
         w.setAthlete(p, AthleteParams(maxSpeed = 8.0))
