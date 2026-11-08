@@ -2,6 +2,7 @@ package io.github.itstrue54.gridironphysics.internal
 
 import io.github.itstrue54.gridironphysics.BodyType
 import io.github.itstrue54.gridironphysics.ShapeDef
+import io.github.itstrue54.gridironphysics.Stance
 
 /** Internal mutable body record. One per live body, stored in World's id-indexed array. */
 internal class Body(
@@ -46,6 +47,24 @@ internal class Body(
 
     /** Upper bound on how fast any point of the body moves (m/s), for speculative margins. */
     @JvmField var speedBound = 0.0
+
+    /** Force (N) applied this tick by locomotion; cleared after velocity integration. */
+    @JvmField var fx = 0.0
+    @JvmField var fy = 0.0
+
+    @JvmField var stance = Stance.Upright
+
+    /** The collider the body was created with: its Upright shape. */
+    @JvmField val uprightShape: ShapeDef = shape
+
+    /** Lying collider for Diving and Down, built on the first stance change. */
+    @JvmField var lyingShape: ShapeDef.Capsule? = null
+
+    /** The material the body was created with; Upright and Diving use it, Down uses DOWNED_PLAYER. */
+    @JvmField var baseMaterial = 0
+
+    /** Set by World.setAthlete; null for bodies without locomotion. */
+    @JvmField var loco: LocomotionController? = null
 
     val sensor: Boolean get() = shape.sensor
 

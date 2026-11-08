@@ -44,9 +44,44 @@ class MathTest {
         assertEquals(45.0, Yards.fromMeters(Yards.toMeters(45.0)), 1e-12)
     }
 
+    /**
+     * sin/cos reduce the argument to |r| ≤ π/4 themselves, then call StrictMath on r: StrictMath's own reduction
+     * allocates on JDK 17+ desktop runtimes. Pure IEEE arithmetic plus StrictMath keeps the results bit-identical on
+     * every platform; they may differ from StrictMath.sin(x) itself by at most 1 ulp.
+     */
+    @Test fun dMathSinCosMatchStrictMathWithin1UlpAndNeverAllocate() {
+        val rng = SplitMix64(9L)
+        val xs = DoubleArray(20000) { i ->
+            when (i % 4) {
+                0 -> rng.nextDouble(-4.0, 4.0)
+                1 -> rng.nextDouble(-1000.0, 1000.0)
+                2 -> (i / 4 - 2500) * (DMath.PI / 4) // multiples of π/4: quadrant edges
+                else -> rng.nextDouble(-1e-3, 1e-3)
+            }
+        }
+        for (x in xs) {
+            assertTrue(kotlin.math.abs(DMath.sin(x) - StrictMath.sin(x)) <= Math.ulp(StrictMath.sin(x)), "sin($x)")
+            assertTrue(kotlin.math.abs(DMath.cos(x) - StrictMath.cos(x)) <= Math.ulp(StrictMath.cos(x)), "cos($x)")
+        }
+        assertEquals(0.0, DMath.sin(0.0)); assertEquals(1.0, DMath.cos(0.0))
+        assertEquals(-1.0, DMath.cos(DMath.PI)); assertEquals(1.0, DMath.sin(DMath.PI / 2))
+        assertTrue(DMath.sin(Double.NaN).isNaN() && DMath.cos(Double.POSITIVE_INFINITY).isNaN())
+        assertEquals(StrictMath.sin(1e9), DMath.sin(1e9)) // huge arguments fall back to StrictMath
+
+        val mx = java.lang.management.ManagementFactory.getThreadMXBean() as? com.sun.management.ThreadMXBean ?: return
+        if (!mx.isThreadAllocatedMemorySupported) return
+        var sink = 0.0
+        repeat(5) { for (x in xs) sink += all(x) } // warm up: the JIT must settle before measuring
+        val tid = Thread.currentThread().id
+        val before = mx.getThreadAllocatedBytes(tid)
+        for (x in xs) sink += all(x)
+        assertEquals(0L, mx.getThreadAllocatedBytes(tid) - before, "bytes allocated by 80000 DMath calls")
+        assertTrue(sink.isFinite())
+    }
+
+    private fun all(x: Double) = DMath.sin(x) + DMath.cos(x) + DMath.atan2(x, 1.3) + DMath.exp(-DMath.abs(x) / 1000.0)
+
     @Test fun dMathUsesStrictMath() {
-        assertEquals(StrictMath.sin(1.234), DMath.sin(1.234))
-        assertEquals(StrictMath.cos(1.234), DMath.cos(1.234))
         assertEquals(StrictMath.atan2(0.3, -0.7), DMath.atan2(0.3, -0.7))
         assertEquals(StrictMath.exp(-2.5), DMath.exp(-2.5))
         assertEquals(StrictMath.log(7.0), DMath.log(7.0))

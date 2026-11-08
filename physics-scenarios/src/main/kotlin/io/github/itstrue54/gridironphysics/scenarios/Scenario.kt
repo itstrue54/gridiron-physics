@@ -1,10 +1,12 @@
 package io.github.itstrue54.gridironphysics.scenarios
 
+import io.github.itstrue54.gridironphysics.AthleteParams
 import io.github.itstrue54.gridironphysics.BodyDef
 import io.github.itstrue54.gridironphysics.BodyId
 import io.github.itstrue54.gridironphysics.BodyType
 import io.github.itstrue54.gridironphysics.Category
 import io.github.itstrue54.gridironphysics.FieldConfig
+import io.github.itstrue54.gridironphysics.LocomotionIntent
 import io.github.itstrue54.gridironphysics.Material
 import io.github.itstrue54.gridironphysics.ShapeDef
 import io.github.itstrue54.gridironphysics.World
@@ -68,6 +70,36 @@ class ScenarioBuilder(val world: World, val rng: SplitMix64) {
             categoryBits = if (tag == Tags.AWAY) Category.AWAY else Category.HOME,
         ),
     )
+
+    /**
+     * A player on locomotion: no damping (the controller holds speed and heading), facing [intent]'s direction
+     * (or his velocity), with [params] and [intent] already set.
+     */
+    fun athlete(
+        x: Double,
+        y: Double,
+        mass: Double,
+        radius: Double,
+        tag: Int,
+        params: AthleteParams,
+        intent: LocomotionIntent,
+        vx: Double = 0.0,
+        vy: Double = 0.0,
+    ): BodyId {
+        val faceX = if (intent.mode == LocomotionIntent.Mode.Velocity) intent.targetX else vx
+        val faceY = if (intent.mode == LocomotionIntent.Mode.Velocity) intent.targetY else vy
+        val id = world.createBody(
+            BodyDef(
+                x = x, y = y, vx = vx, vy = vy, mass = mass,
+                angle = if (faceX == 0.0 && faceY == 0.0) 0.0 else DMath.atan2(faceY, faceX),
+                shape = ShapeDef.Circle(radius), userData = tag,
+                categoryBits = if (tag == Tags.AWAY) Category.AWAY else Category.HOME,
+            ),
+        )
+        world.setAthlete(id, params)
+        world.setIntent(id, intent)
+        return id
+    }
 
     /** Any body, for setups the helpers above don't cover. */
     fun body(def: BodyDef): BodyId = world.createBody(def)

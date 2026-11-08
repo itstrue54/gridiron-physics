@@ -51,7 +51,57 @@ class ScenariosTest {
         assertEquals(Scenarios.drift.build().stateHash(), Scenarios.drift.build().stateHash())
     }
 
-    // ------------------------------------------------------------ M2: head-on tackle (collision only)
+    // ------------------------------------------------------------ M3: head-on tackle (locomotion)
+
+    private fun wrap(a: Double): Double {
+        var r = a % (2 * DMath.PI)
+        if (r > DMath.PI) r -= 2 * DMath.PI
+        if (r < -DMath.PI) r += 2 * DMath.PI
+        return r
+    }
+
+    @Test fun headOnTackleRunsOnLocomotionNotCoasting() {
+        val w = Scenarios.headOnTackle.build()
+        val ids = ids(w)
+        for (id in ids) {
+            val b = w.body(id)
+            assertTrue(b.athlete != null, "body ${id.value} has an athlete")
+            assertEquals(0.0, b.linearDamping); assertEquals(0.0, b.angularDamping)
+        }
+        val back = ids.single { w.body(it).userData == Tags.HOME }
+        val lb = ids.single { w.body(it).userData == Tags.AWAY }
+        assertTrue(w.body(lb).x - w.body(back).x >= 10.0, "they start far enough apart to see them run")
+    }
+
+    @Test fun headOnTackleDrivesThroughContact() {
+        val w = Scenarios.headOnTackle.build()
+        val ids = ids(w)
+        val back = ids.single { w.body(it).userData == Tags.HOME }
+        val lb = ids.single { w.body(it).userData == Tags.AWAY }
+        var hitTick = -1
+        var pushing = 0
+        var hitX = 0.0
+        for (t in 0 until 180) {
+            w.step()
+            var push = false
+            for (i in 0 until w.contactCount) {
+                val c = w.contact(i)
+                if (c.wall == io.github.itstrue54.gridironphysics.ContactView.NO_WALL && c.normalImpulse(0) > 0.0) push = true
+            }
+            if (push && hitTick < 0) { hitTick = t; hitX = (w.body(back).x + w.body(lb).x) / 2 }
+            if (hitTick >= 0 && t in hitTick + 1..hitTick + 30 && push) pushing++
+            if (hitTick >= 0 && t == hitTick + 30) {
+                // Both still face where they are trying to go: the back downfield, the linebacker upfield.
+                assertEquals(0.0, wrap(w.body(back).angle), 0.2, "back's heading")
+                assertEquals(0.0, wrap(w.body(lb).angle - DMath.PI), 0.2, "linebacker's heading")
+            }
+        }
+        assertTrue(hitTick >= 0, "they must collide")
+        // A shove, not a bounce: they stay in pushing contact for a while, then drive on past each other.
+        assertTrue(pushing >= 8, "they keep driving into each other after the hit: pushed on $pushing of 30 ticks")
+        assertTrue(w.body(back).x > hitX + 3.0 && w.body(back).vx > 4.0, "the back drives on downfield: x ${w.body(back).x}, vx ${w.body(back).vx}")
+        assertTrue(w.body(lb).x < hitX - 3.0 && w.body(lb).vx < -3.0, "the linebacker drives on upfield: x ${w.body(lb).x}, vx ${w.body(lb).vx}")
+    }
 
     @Test fun headOnTackleIsA90KgBackVsA115KgLinebacker() {
         val w = Scenarios.headOnTackle.build()
@@ -73,9 +123,13 @@ class ScenariosTest {
         var maxDepth = 0.0
         var pBefore = px()
         var pAfter = 0.0
+        val rSum = w.body(back).radius + w.body(lb).radius
         repeat(180) {
             val p = px()
             w.step()
+            // On locomotion they shove past each other after the hit, so "no tunneling" means never through.
+            val gap = DMath.hypot2(w.body(lb).x - w.body(back).x, w.body(lb).y - w.body(back).y)
+            assertTrue(gap > rSum - 0.01, "centers $gap apart, radii sum $rSum")
             for (i in 0 until w.contactCount) {
                 val c = w.contact(i)
                 if (c.normalImpulse(0) > 0.0 && !hit) { hit = true; pBefore = p; pAfter = px() }
@@ -83,9 +137,8 @@ class ScenariosTest {
             }
         }
         assertTrue(hit, "they must collide")
-        assertTrue(w.body(back).x < w.body(lb).x, "no tunneling")
         assertTrue(maxDepth < 0.01, "max penetration $maxDepth")
-        // Damping acts during the impact tick, so allow a small tolerance.
+        // Locomotion forces act during the impact tick (near zero at top speed), so allow a small tolerance.
         assertEquals(pBefore, pAfter, kotlin.math.abs(pBefore) * 0.02 + 5.0)
     }
 
@@ -107,7 +160,8 @@ class ScenariosTest {
     }
 
     @Test fun playersStopSpinningSoonAfterAHit() {
-        for (sc in listOf(Scenarios.headOnTackle, Scenarios.contactLab)) {
+        // Coasting bodies only: players on locomotion hold their own heading (headOnTackleDrivesThroughContact).
+        for (sc in listOf(Scenarios.contactLab)) {
             val w = sc.build()
             val ids = ids(w)
             // Each body is checked 0.5 s after the last tick it took an impulse.
@@ -172,8 +226,74 @@ class ScenariosTest {
         assertTrue(ids(w).filter { w.body(it).type == BodyType.Dynamic }.all { !w.body(it).awake }, "everything has come to rest after 10 s")
     }
 
+    // ------------------------------------------------------------ M3: sideline run
+
+    private class Sideline(val w: World, val carrier: BodyId, val pursuer: BodyId)
+
+    private fun sideline(): Sideline {
+        val w = Scenarios.sidelineRun.build()
+        val ids = ids(w)
+        assertEquals(2, ids.size)
+        return Sideline(w, ids.single { w.body(it).userData == Tags.HOME }, ids.single { w.body(it).userData == Tags.AWAY })
+    }
+
+    @Test fun sidelineRunStartsWithTheCarrierAtTopSpeedAndThePursuerAtAnAngle() {
+        val s = sideline()
+        // BodyView is one shared instance per world: read each body's values before viewing the next.
+        val c = s.w.body(s.carrier)
+        val top = c.athlete!!.maxSpeed
+        assertEquals(top, c.vx, 1e-12); assertEquals(0.0, c.vy)
+        assertTrue(c.y < 5.0, "carrier runs near the sideline, y = ${c.y}")
+        val cx = c.x; val cy = c.y
+        val p = s.w.body(s.pursuer)
+        assertTrue(p.athlete!!.maxSpeed < top, "the pursuer is slower, so he needs the angle")
+        assertTrue(p.y > cy + 8.0 && p.x > cx, "pursuer starts infield and ahead")
+        assertTrue(p.vy < -1.0 && kotlin.math.abs(p.vx) > 1.0, "pursuer runs at an angle: (${p.vx}, ${p.vy})")
+    }
+
+    @Test fun sidelineRunPursuerCutsTheCarrierOffNearTheSideline() {
+        val s = sideline()
+        val w = s.w
+        val top = w.body(s.carrier).athlete!!.maxSpeed
+        val y0 = w.body(s.carrier).y
+        var hitTick = -1
+        var hitY = 0.0
+        var vAtHit = 0.0
+        for (t in 0 until 300) {
+            val v = w.body(s.carrier).vx
+            w.step()
+            if (hitTick < 0) {
+                for (i in 0 until w.contactCount) {
+                    val c = w.contact(i)
+                    if (c.wall == io.github.itstrue54.gridironphysics.ContactView.NO_WALL && c.normalImpulse(0) > 0.0) {
+                        hitTick = t; hitY = c.pointY(0); vAtHit = v
+                    }
+                }
+                if (hitTick < 0) assertEquals(y0, w.body(s.carrier).y, 1e-9, "carrier runs a straight line until the hit")
+                for (i in 0 until w.slipCount) assertTrue(w.slipBody(i) != s.carrier, "no slip running straight")
+            }
+        }
+        assertTrue(hitTick in 0 until 150, "pursuer intercepts within 2.5 s, hit at tick $hitTick")
+        assertTrue(hitY < 6.0, "the hit is near the sideline, y = $hitY")
+        assertTrue(vAtHit >= 0.99 * top, "carrier is at top speed when hit: $vAtHit")
+        val f = w.field
+        for (id in listOf(s.carrier, s.pursuer)) {
+            val b = w.body(id)
+            assertTrue(b.x > -f.runoffM && b.x < f.lengthM + f.runoffM && b.y > -f.runoffM && b.y < f.widthM + f.runoffM, "body ${id.value} left the world")
+        }
+    }
+
+    @Test fun sidelineRunIsDeterministic() {
+        val a = Scenarios.sidelineRun.build(); val b = Scenarios.sidelineRun.build()
+        repeat(240) {
+            a.step(); b.step()
+            assertEquals(a.stateHash(), b.stateHash())
+        }
+    }
+
     @Test fun registryListsDrift() {
         assertTrue(Scenarios.drift in Scenarios.all)
+        assertTrue(Scenarios.sidelineRun in Scenarios.all)
         assertTrue(Scenarios.headOnTackle in Scenarios.all)
         assertTrue(Scenarios.contactLab in Scenarios.all)
         assertEquals(Scenarios.all.size, Scenarios.all.map { it.name }.toSet().size, "scenario names are unique")

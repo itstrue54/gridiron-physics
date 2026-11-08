@@ -1,6 +1,8 @@
 package io.github.itstrue54.gridironphysics.scenarios
 
+import io.github.itstrue54.gridironphysics.AthleteParams
 import io.github.itstrue54.gridironphysics.BodyDef
+import io.github.itstrue54.gridironphysics.LocomotionIntent
 import io.github.itstrue54.gridironphysics.BodyType
 import io.github.itstrue54.gridironphysics.Category
 import io.github.itstrue54.gridironphysics.Material
@@ -11,27 +13,54 @@ import io.github.itstrue54.gridironphysics.math.DMath
 object Scenarios {
 
     /**
-     * M2: the spec's head-on tackle, collision only (locomotion arrives in M3): a 90 kg back at 9 m/s meets a
-     * 115 kg linebacker at 7 m/s, slightly off-center so the hit has a glancing component.
+     * M3: the spec's head-on tackle on locomotion: a 90 kg back at 9 m/s and a 115 kg linebacker at 7 m/s run
+     * at each other (both already at top speed), slightly off-center so the hit has a glancing component. Their
+     * intents keep driving after the hit: the back downfield, the linebacker upfield.
      */
     val headOnTackle = scenario(
         name = "Head-on tackle",
-        description = "90 kg back at 9 m/s vs 115 kg linebacker at 7 m/s, collision only (M2)",
+        description = "90 kg back at 9 m/s vs 115 kg linebacker at 7 m/s; both keep driving through the hit (M3)",
         seed = 11L,
     ) {
         val mid = field.midfieldX
         val cy = field.widthM / 2
-        // No locomotion until M3, so the players coast: start close and with light damping so they still
-        // meet at full speed. Strong angular damping stands in for a player holding his heading.
-        fun runner(x: Double, y: Double, vx: Double, mass: Double, r: Double, tag: Int) = body(
-            BodyDef(
-                x = x, y = y, vx = vx, mass = mass, linearDamping = 0.25, angularDamping = SPIN_DAMPING,
-                angle = if (tag == Tags.AWAY) DMath.PI else 0.0, shape = ShapeDef.Circle(r), userData = tag,
-                categoryBits = if (tag == Tags.AWAY) Category.AWAY else Category.HOME,
-            ),
-        )
-        runner(mid - 1.6, cy, 9.0, 90.0, 0.32, Tags.HOME)
-        runner(mid + 1.6, cy + 0.15, -7.0, 115.0, 0.36, Tags.AWAY)
+        val back = AthleteParams(maxSpeed = 9.0, maxAccel = 7.5, maxDecel = 8.0, turnRateAtRest = 12.0, turnRateAtMax = 2.5)
+        val linebacker = AthleteParams(maxSpeed = 7.0, maxAccel = 6.5, maxDecel = 8.0, turnRateAtRest = 10.0, turnRateAtMax = 2.5)
+        athlete(mid - 6.0, cy, 90.0, 0.32, Tags.HOME, back, LocomotionIntent.velocity(back.maxSpeed, 0.0), vx = back.maxSpeed)
+        athlete(mid + 6.0, cy + 0.15, 115.0, 0.36, Tags.AWAY, linebacker, LocomotionIntent.velocity(-linebacker.maxSpeed, 0.0), vx = -linebacker.maxSpeed)
+    }
+
+    /**
+     * M3: a carrier at top speed down the near sideline and a slower pursuer taking an angle from infield. The
+     * pursuer aims at the intercept point (where a straight line at his top speed meets the carrier's path), so
+     * he cuts the carrier off at the sideline instead of chasing him from behind.
+     */
+    val sidelineRun = scenario(
+        name = "Sideline run",
+        description = "Carrier at 9.3 m/s down the sideline; a 8.8 m/s pursuer takes the angle and cuts him off (M3)",
+        seed = 13L,
+    ) {
+        val carrier = AthleteParams(maxSpeed = 9.3, maxAccel = 8.0, maxDecel = 8.5, turnRateAtRest = 12.0, turnRateAtMax = 2.5)
+        val pursuer = AthleteParams(maxSpeed = 8.8, maxAccel = 7.5, maxDecel = 8.5, turnRateAtRest = 12.0, turnRateAtMax = 2.5)
+        val cx = field.midfieldX - 15.0
+        val cy = 3.0
+        val px = cx + 22.0
+        val py = 15.0
+        // Intercept: |d + vc·t| = vp·t with d = carrier − pursuer, vc = (vCarrier, 0). Take the earliest t > 0.
+        val vc = carrier.maxSpeed
+        val vp = pursuer.maxSpeed
+        val dx = cx - px
+        val dy = cy - py
+        val a = vc * vc - vp * vp
+        val b = 2 * dx * vc
+        val c = dx * dx + dy * dy
+        val t = (-b - DMath.sqrt(b * b - 4 * a * c)) / (2 * a)
+        val ax = dx + vc * t
+        val len = DMath.hypot2(ax, dy)
+        val ux = ax / len
+        val uy = dy / len
+        athlete(cx, cy, 90.0, 0.32, Tags.HOME, carrier, LocomotionIntent.velocity(vc, 0.0), vx = vc)
+        athlete(px, py, 100.0, 0.34, Tags.AWAY, pursuer, LocomotionIntent.velocity(vp * ux, vp * uy), vx = vp * ux, vy = vp * uy)
     }
 
     /**
@@ -138,8 +167,8 @@ object Scenarios {
         prop(x = field.homeGoalLineX, y = field.widthM / 2, radius = 0.5)
     }
 
-    val all: List<Scenario> = listOf(headOnTackle, contactLab, drift)
+    val all: List<Scenario> = listOf(headOnTackle, sidelineRun, contactLab, drift)
 
-    /** Angular damping for coasting players (M2 has no locomotion to hold a heading). */
+    /** Angular damping for coasting bodies (no locomotion holds their heading). */
     private const val SPIN_DAMPING = 8.0
 }

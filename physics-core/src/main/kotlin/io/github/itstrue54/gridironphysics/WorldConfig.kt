@@ -20,6 +20,11 @@ data class WorldConfig(
     val runoffWalls: Boolean = true,
     /** Contact pool size. Pairs beyond it are dropped (in id order) for that tick. */
     val maxContacts: Int = 512,
+    /**
+     * Friction coefficient of a Diving or Down player sliding on the ground, scaled by the surface's traction
+     * multiplier. It is the body's, not the cleats', so it does not use the athlete's traction.
+     */
+    val slideFriction: Double = 0.8,
 ) {
     init {
         require(maxBodies > 0) { "maxBodies must be > 0" }
@@ -28,6 +33,7 @@ data class WorldConfig(
         require(relaxIterations >= 0) { "relaxIterations must be >= 0" }
         require(contactHertz > 0.0 && contactDampingRatio >= 0.0 && maxPushoutSpeed >= 0.0) { "bad contact softness" }
         require(restitutionThreshold >= 0.0 && maxContacts > 0) { "bad restitutionThreshold/maxContacts" }
+        require(slideFriction.isFinite() && slideFriction >= 0.0) { "slideFriction must be finite and >= 0: $slideFriction" }
         require(sleepTimeS >= 0.0 && sleepSpeed >= 0.0 && gravity >= 0.0) { "bad sleep/gravity" }
     }
 
