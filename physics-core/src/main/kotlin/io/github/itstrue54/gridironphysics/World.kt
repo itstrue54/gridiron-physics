@@ -1,7 +1,10 @@
 package io.github.itstrue54.gridironphysics
 
-import io.github.itstrue54.gridironphysics.internal.BallState
+import io.github.itstrue54.gridironphysics.internal.BallRecord
 import io.github.itstrue54.gridironphysics.internal.Body
+import io.github.itstrue54.gridironphysics.internal.Flight
+import io.github.itstrue54.gridironphysics.internal.FlightPoint
+import io.github.itstrue54.gridironphysics.internal.GoalPosts
 import io.github.itstrue54.gridironphysics.internal.BroadPhase
 import io.github.itstrue54.gridironphysics.internal.BruteForceBroadPhase
 import io.github.itstrue54.gridironphysics.internal.Collide
@@ -16,6 +19,7 @@ import io.github.itstrue54.gridironphysics.math.DMath
 import io.github.itstrue54.gridironphysics.math.Fnv1a64
 import io.github.itstrue54.gridironphysics.math.SplitMix64
 import io.github.itstrue54.gridironphysics.math.Vec2
+import io.github.itstrue54.gridironphysics.math.Vec3
 
 /**
  * The simulation. Advances in fixed 1/60 s ticks; the same seed and the same calls produce the same
@@ -31,15 +35,20 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
         private set
 
     internal val rng = SplitMix64(seed)
-    internal val ball = BallState()
+    internal val ball = BallRecord()
 
     init {
-        require(config.maxBodies <= BodyId.MAX_SLOTS) { "maxBodies must be <= ${BodyId.MAX_SLOTS}" }
+        require(config.maxBodies < BodyId.MAX_SLOTS) { "maxBodies must be < ${BodyId.MAX_SLOTS}" }
     }
 
-    /** Slot-indexed storage. Iterating slots in order is iterating bodies in ascending id order. */
-    private val bodies = arrayOfNulls<Body>(config.maxBodies)
-    private val generations = IntArray(config.maxBodies)
+    /**
+     * Slot-indexed storage. Iterating slots in order is iterating bodies in ascending id order. The last slot,
+     * [ballSlot], is the loose ball's and holds it only while the ball is [BallState.Loose].
+     */
+    private val bodies = arrayOfNulls<Body>(config.maxBodies + 1)
+    private val generations = IntArray(config.maxBodies + 1)
+
+    /** Live game bodies (the loose ball is not one of them, so it never counts against maxBodies). */
     private var liveCount = 0
 
     /** One past the highest slot ever used; loops stop here. */
@@ -50,9 +59,11 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
 
     /** Runoff walls: engine-owned static geometry, not bodies (they never appear in [bodyIds]). */
     private val walls: Array<Body> = makeWalls()
-    private val wallCount = if (config.runoffWalls) walls.size else 0
+
+    /** Which of [walls] exist: the four runoff walls with [WorldConfig.runoffWalls], the two post bases with [WorldConfig.goalPosts]. */
+    private val wallOn = BooleanArray(walls.size) { k -> if (k < ContactView.POST_HOME) config.runoffWalls else config.goalPosts }
     private val broad: BroadPhase = BruteForceBroadPhase()
-    private val proxyCap = config.maxBodies + walls.size
+    private val proxyCap = config.maxBodies + 1 + walls.size
     private val proxyActive = BooleanArray(proxyCap)
     private val proxyMinX = DoubleArray(proxyCap)
     private val proxyMinY = DoubleArray(proxyCap)
@@ -83,8 +94,33 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
     }
 
     // Sleep islands: union-find over body slots.
-    private val islandParent = IntArray(config.maxBodies)
-    private val islandMinTime = DoubleArray(config.maxBodies)
+    private val islandParent = IntArray(config.maxBodies + 1)
+    private val islandMinTime = DoubleArray(config.maxBodies + 1)
+
+    // ---------------------------------------------------------------- the ball (state; behavior below)
+
+    private val ballSlot = config.maxBodies
+
+    /**
+     * The ball's id. It names a body (in [bodyIds], [body], queries and contacts) only while the ball is
+     * [BallState.Loose]; [deflect] takes it in the air too. It never changes.
+     */
+    val ballId: BodyId = BodyId.of(ballSlot, 0)
+
+    /** The loose ball's body: engine-owned, built once, put in [ballSlot] when the ball lands and taken out when it leaves the ground. */
+    private val ballBody: Body = Body(ballId.value, BodyType.Dynamic, ShapeDef.Circle(config.ball.radius)).also { b ->
+        b.mass = config.ball.mass; b.invMass = 1.0 / b.mass
+        b.inertia = inertiaAboutOrigin(b.shape, b.mass); b.invInertia = 1.0 / b.inertia
+        b.angularDamping = BALL_SPIN_DAMPING
+        b.bullet = true
+        b.categoryBits = Category.BALL; b.maskBits = Category.ALL
+        b.material = Material.BALL; b.baseMaterial = Material.BALL
+        b.extent = config.ball.radius
+    }
+    private val ballView = BallView(ball)
+    private val flight = Flight(config.ball, config.gravity)
+    private val posts = GoalPosts(field, config.ball.radius)
+    private val fp = FlightPoint()
 
     // ---------------------------------------------------------------- bodies
 
@@ -125,7 +161,7 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
     }
 
     fun destroyBody(id: BodyId) {
-        val dead = live(id)
+        val dead = gameBody(id)
         // Bodies resting against this one must not stay asleep against nothing.
         for (i in 0 until contactCount) {
             val c = contacts[i]
@@ -136,7 +172,11 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
             val j = joints[k] ?: continue
             if (j.a === dead || j.b === dead) removeJoint(j)
         }
-        if (carrier === dead) { carrier = null; forwardProgressX = Double.NaN }
+        if (carrier === dead) {
+            // The ball drops dead where he was.
+            carrier = null; forwardProgressX = Double.NaN
+            ball.mode = BallRecord.MODE_DEAD; ball.vx = 0.0; ball.vy = 0.0; ball.vz = 0.0
+        }
         val slot = id.slot
         bodies[slot] = null
         generations[slot] = (generations[slot] + 1) and BodyId.GEN_MASK
@@ -150,8 +190,8 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
         return view
     }
 
-    /** Number of live bodies. */
-    val bodyCount: Int get() = liveCount
+    /** Number of live bodies, the loose ball included. */
+    val bodyCount: Int get() = liveCount + (if (bodies[ballSlot] != null) 1 else 0)
 
     /**
      * Writes live body ids (as [BodyId.value]) in ascending order into [out] and returns how many were
@@ -169,9 +209,19 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
 
     private fun live(id: BodyId): Body {
         val slot = id.slot
+        if (id.value == ballId.value && bodies[ballSlot] == null) {
+            throw IllegalArgumentException("The ball is a body only while it is Loose; it is ${ballView.state}")
+        }
         require(id.value >= 0 && slot < highWater) { "Unknown body id ${id.value}" }
         val b = bodies[slot]
         require(b != null && b.id == id.value) { "Body ${id.value} was destroyed" }
+        return b
+    }
+
+    /** A live body the game owns: not the loose ball, which belongs to the engine. */
+    private fun gameBody(id: BodyId): Body {
+        val b = live(id)
+        require(b !== ballBody) { "Body ${id.value} is the ball, which belongs to the engine: use launchBall, deflect and setBallCarrier" }
         return b
     }
 
@@ -195,7 +245,7 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
 
     /** Gives a dynamic body an athlete's limits, which it needs before [setIntent]. */
     fun setAthlete(id: BodyId, params: AthleteParams) {
-        val b = live(id)
+        val b = gameBody(id)
         require(b.type == BodyType.Dynamic) { "Only dynamic bodies can have an athlete: body ${id.value} is ${b.type}" }
         val c = b.loco
         if (c == null) b.loco = LocomotionController(params) else c.params = params
@@ -207,7 +257,7 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
      * is not null. The values are copied, so the game can reuse [intent]. Wakes the body.
      */
     fun setIntent(id: BodyId, intent: LocomotionIntent) {
-        val b = live(id)
+        val b = gameBody(id)
         val c = checkNotNull(b.loco) { "Body ${id.value} has no athlete: call setAthlete first" }
         intent.validate()
         val stance = intent.stance
@@ -226,7 +276,7 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
      * ignores its intent until it is Upright again; one without an athlete just coasts under its damping.
      */
     fun setStance(id: BodyId, stance: Stance) {
-        val b = live(id)
+        val b = gameBody(id)
         checkStanceBody(b)
         applyStance(b, stance)
         wake(b)
@@ -391,6 +441,7 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
 
     private fun newJoint(type: JointType, a: Body, b: Body, length: Double?, soft: Softness?): Joint {
         require(a !== b) { "A joint needs two different bodies: ${a.id}" }
+        require(a !== ballBody && b !== ballBody) { "The ball cannot be jointed" }
         require(a.type == BodyType.Dynamic || b.type == BodyType.Dynamic) { "A joint needs a dynamic body: ${a.id} is ${a.type}, ${b.id} is ${b.type}" }
         check(jointLive < config.maxJoints) { "Joint pool is full: ${config.maxJoints} live joints" }
         var slot = 0
@@ -435,18 +486,25 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
     val ballCarrier: BodyId? get() = carrier?.let { BodyId(it.id) }
 
     /**
-     * Gives the ball to [id] (a dynamic body), or takes it away with null. Possession is the game's call. Tracking
-     * restarts from the new carrier's current x.
+     * Gives the ball to [id] (a dynamic body), or takes it away with null. Possession is the game's call: giving the
+     * ball ends its flight (a catch) or picks it up off the ground, and the ball is [BallState.Carried] from then on.
+     * Taking it from its carrier with null makes it [BallState.Dead] where it is. Tracking restarts from the new
+     * carrier's current x.
      */
     fun setBallCarrier(id: BodyId?) {
         if (id == null) {
             carrier = null
             forwardProgressX = Double.NaN
+            if (ball.mode == BallRecord.MODE_CARRIED) { ball.mode = BallRecord.MODE_DEAD; ball.vx = 0.0; ball.vy = 0.0; ball.vz = 0.0 }
         } else {
-            val b = live(id)
+            val b = gameBody(id)
             require(b.type == BodyType.Dynamic) { "The ball carrier must be dynamic: body ${id.value} is ${b.type}" }
+            if (ball.mode == BallRecord.MODE_LOOSE) removeBallBody()
             carrier = b
             forwardProgressX = b.x
+            ball.mode = BallRecord.MODE_CARRIED
+            carryBall()
+            ball.prevX = ball.x; ball.prevY = ball.y; ball.prevZ = ball.z
         }
         recorder?.onSetBallCarrier(tick, id)
     }
@@ -476,7 +534,7 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
     // never allocate. They see bodies only: runoff walls are not reported. Ties go to the lower body id.
 
     private val ray = RayResult()
-    private val nearDist = DoubleArray(config.maxBodies)
+    private val nearDist = DoubleArray(config.maxBodies + 1)
 
     private fun passes(b: Body, f: QueryFilter): Boolean =
         (b.categoryBits and f.maskBits) != 0 && b.id != f.ignore && (f.includeSensors || !b.sensor)
@@ -598,6 +656,7 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
         solveVelocities()
         integratePositions()
         relax()
+        continuousCollision()
         breakJoints()
         ballFlight()
         emitEvents()
@@ -645,6 +704,7 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
             b.vx += b.fx * b.invMass * dt
             b.vy += b.fy * b.invMass * dt
             b.fx = 0.0; b.fy = 0.0
+            if (b === ballBody) rollBall(b)
             // Damping uses the Box2D form, stable for any damping value.
             b.vx *= 1.0 / (1.0 + dt * b.linearDamping)
             b.vy *= 1.0 / (1.0 + dt * b.linearDamping)
@@ -664,9 +724,9 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
      */
     private fun broadPhase() {
         val dt = WorldConfig.DT
-        val n = highWater + wallCount
+        val n = highWater + walls.size
         for (p in 0 until n) {
-            val b = if (p < highWater) bodies[p] else walls[p - highWater]
+            val b = if (p < highWater) bodies[p] else if (wallOn[p - highWater]) walls[p - highWater] else null
             if (b == null) { proxyActive[p] = false; continue }
             proxyActive[p] = true
             b.x0 = b.x; b.y0 = b.y; b.angle0 = b.angle
@@ -920,8 +980,402 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
         }
     }
 
+    // ---------------------------------------------------------------- ball: commands
+
+    /** The ball, as of the end of the last step (or the last ball command). Always returns the same view. */
+    fun ball(): BallView = ballView
+
+    /** Wind (m/s) on the ground plane; drag acts on the ball's speed relative to it. */
+    val windX: Double get() = flight.windX
+    val windY: Double get() = flight.windY
+
+    fun setWind(x: Double, y: Double) {
+        require(x.isFinite() && y.isFinite()) { "wind must be finite: ($x, $y)" }
+        flight.windX = x; flight.windY = y
+        recorder?.onSetWind(tick, x, y)
+    }
+
+    /**
+     * Puts the ball in the air at [from] (z ≥ 0 is its height) with [velocity]: a pass, a kick, a pitch or a fumble.
+     * It takes the ball from its carrier (and from the ground, if it was loose). The values are copied.
+     */
+    fun launchBall(from: Vec3, velocity: Vec3, mode: FlightMode) {
+        require(from.x.isFinite() && from.y.isFinite() && from.z.isFinite() && from.z >= 0.0) { "launch point must be finite with z >= 0: $from" }
+        require(velocity.x.isFinite() && velocity.y.isFinite() && velocity.z.isFinite()) { "launch velocity must be finite: $velocity" }
+        if (ball.mode == BallRecord.MODE_LOOSE) removeBallBody()
+        carrier = null
+        forwardProgressX = Double.NaN
+        ball.flightMode = mode.ordinal
+        takeOff(from.x, from.y, from.z, velocity.x, velocity.y, velocity.z)
+        recorder?.onLaunchBall(tick, from, velocity, mode)
+    }
+
+    /**
+     * A tip, bat or hit from game logic: adds [impulse] (N·s, on the ground plane) to a dynamic body's velocity and wakes
+     * it. For the ball ([ballId]) it works in the air and on the ground, and [impulseZ] (≥ 0 on the ground) adds lift:
+     * a loose ball batted upward goes back in the air. Other bodies take no impulseZ. Throws [IllegalStateException]
+     * when the ball is Dead or Carried.
+     */
+    fun deflect(id: BodyId, impulse: Vec2, impulseZ: Double = 0.0) {
+        val ix = impulse.x; val iy = impulse.y
+        require(ix.isFinite() && iy.isFinite() && impulseZ.isFinite()) { "impulse must be finite: ($ix, $iy, $impulseZ)" }
+        if (id.value == ballId.value) {
+            val inv = 1.0 / config.ball.mass
+            when (ball.mode) {
+                BallRecord.MODE_AIRBORNE -> { ball.vx += ix * inv; ball.vy += iy * inv; ball.vz += impulseZ * inv }
+                BallRecord.MODE_LOOSE -> {
+                    val b = ballBody
+                    if (impulseZ > 0.0) {
+                        val vx = b.vx + ix * inv; val vy = b.vy + iy * inv
+                        removeBallBody()
+                        takeOff(ball.x, ball.y, 0.0, vx, vy, impulseZ * inv)
+                    } else {
+                        b.vx += ix * inv; b.vy += iy * inv
+                        wake(b)
+                        ball.vx = b.vx; ball.vy = b.vy
+                    }
+                }
+                else -> throw IllegalStateException("No ball in play to deflect: the ball is ${ballView.state}")
+            }
+        } else {
+            val b = live(id)
+            require(b.type == BodyType.Dynamic) { "Only dynamic bodies can be deflected: body ${id.value} is ${b.type}" }
+            require(impulseZ == 0.0) { "impulseZ is for the ball only: body ${id.value}" }
+            b.vx += ix * b.invMass; b.vy += iy * b.invMass
+            wake(b)
+        }
+        recorder?.onDeflect(tick, id, ix, iy, impulseZ)
+    }
+
+    /**
+     * Gives a player a catch window: the ball in the air is catchable while it is within [reachRadius] (m) of his
+     * center and between [BallConfig.catchMinHeight] and [reachHeight] (m; jumping raises it). Both 0 (the default)
+     * means no window. The engine reports [EventType.CatchOpportunity]; the game decides the catch.
+     */
+    fun setReach(id: BodyId, reachRadius: Double, reachHeight: Double) {
+        val b = gameBody(id)
+        require(reachRadius.isFinite() && reachRadius >= 0.0) { "reachRadius must be finite and >= 0: $reachRadius" }
+        require(reachHeight.isFinite() && reachHeight >= 0.0) { "reachHeight must be finite and >= 0: $reachHeight" }
+        b.reachRadius = reachRadius; b.reachHeight = reachHeight
+        recorder?.onSetReach(tick, id, reachRadius, reachHeight)
+    }
+
+    // ---------------------------------------------------------------- ball: launch helpers (read-only)
+
+    // These fly a ball through the same drag model and ticks as step(), in the current wind, without goal posts, catch
+    // windows or bounces. They change nothing and never allocate; "comes down through" a point means the ball descends
+    // through the point's height there, so a target on the ground (z = 0) is where it lands.
+
+    /**
+     * The launch velocity from [from] whose arc peaks at height [apexHeight] (m above the ground, above both [from] and
+     * [target]) and comes down through [target]. Written to [out], which is returned.
+     */
+    fun launchVelocityFor(from: Vec3, target: Vec3, apexHeight: Double, mode: FlightMode, out: Vec3): Vec3 {
+        requirePoint(from); requirePoint(target)
+        require(apexHeight.isFinite() && apexHeight > from.z && apexHeight > target.z) {
+            "apexHeight must be above the launch (${from.z}) and the target (${target.z}): $apexHeight"
+        }
+        flight.solveApex(from.x, from.y, from.z, target.x, target.y, target.z, apexHeight, mode.ordinal)
+        return out.set(flight.outX, flight.outY, flight.outZ)
+    }
+
+    /**
+     * The launch velocity of magnitude [speed] from [from] that comes down through [target], on the lower arc or (with
+     * [highArc]) the higher one. Writes [out] and returns true, or returns false (leaving [out] alone) when [target] is
+     * out of reach at that speed.
+     */
+    fun launchVelocityFor(from: Vec3, target: Vec3, speed: Double, highArc: Boolean, mode: FlightMode, out: Vec3): Boolean {
+        requirePoint(from); requirePoint(target)
+        require(speed.isFinite() && speed > 0.0) { "speed must be finite and > 0: $speed" }
+        if (!flight.solveSpeed(from.x, from.y, from.z, target.x, target.y, target.z, speed, highArc, mode.ordinal)) return false
+        out.set(flight.outX, flight.outY, flight.outZ)
+        return true
+    }
+
+    /**
+     * Seconds after a launch from [from] at [velocity] until the ball has covered the ground distance to [target]
+     * (along the line from [from] to it), for leading a receiver. NaN when it lands first.
+     */
+    fun timeToArrive(from: Vec3, velocity: Vec3, mode: FlightMode, target: Vec3): Double {
+        requirePoint(from); requirePoint(target)
+        val dx = target.x - from.x; val dy = target.y - from.y
+        val d = DMath.hypot2(dx, dy)
+        if (d == 0.0) return 0.0
+        return flight.timeToDistance(from.x, from.y, from.z, velocity.x, velocity.y, velocity.z, mode.ordinal, dx / d, dy / d, d)
+    }
+
+    /**
+     * Where a launch from [from] at [velocity] first reaches the ground, written to [out] (z = 0); returns the flight
+     * time (s), or NaN (and NaN in [out]) when it stays up longer than a minute.
+     */
+    fun predictLanding(from: Vec3, velocity: Vec3, mode: FlightMode, out: Vec3): Double {
+        requirePoint(from)
+        if (!flight.predict(from.x, from.y, from.z, velocity.x, velocity.y, velocity.z, mode.ordinal, 0.0)) {
+            out.set(Double.NaN, Double.NaN, Double.NaN)
+            return Double.NaN
+        }
+        out.set(flight.hitX, flight.hitY, 0.0)
+        return flight.hitTime
+    }
+
+    private fun requirePoint(p: Vec3) {
+        require(p.x.isFinite() && p.y.isFinite() && p.z.isFinite() && p.z >= 0.0) { "point must be finite with z >= 0: $p" }
+    }
+
+    // ---------------------------------------------------------------- ball: simulation
+
+    /** The ball leaves the ground or a hand: airborne from here, every catch window closed. */
+    private fun takeOff(x: Double, y: Double, z: Double, vx: Double, vy: Double, vz: Double) {
+        val s = ball
+        s.mode = BallRecord.MODE_AIRBORNE
+        s.x = x; s.y = y; s.z = z; s.vx = vx; s.vy = vy; s.vz = vz
+        s.prevX = x; s.prevY = y; s.prevZ = z
+        for (i in 0 until highWater) bodies[i]?.inCatch = false
+    }
+
+    private fun carryBall() {
+        val c = carrier!!
+        val s = ball
+        s.x = c.x; s.y = c.y; s.z = config.ball.carryHeight
+        s.vx = c.vx; s.vy = c.vy; s.vz = 0.0
+    }
+
+    /** A loose ball rolls to a stop: its ground speed drops by rollFriction·g each second. */
+    private fun rollBall(b: Body) {
+        val speed = DMath.hypot2(b.vx, b.vy)
+        val dec = config.ball.rollFriction * config.gravity * WorldConfig.DT
+        if (speed <= dec) { b.vx = 0.0; b.vy = 0.0 } else { val f = (speed - dec) / speed; b.vx *= f; b.vy *= f }
+    }
+
+    /** The ball lands for good: it becomes the loose-ball body at (x, y). Landing on a line or out of bounds is reported this tick. */
+    private fun insertBallBody(x: Double, y: Double, vx: Double, vy: Double) {
+        val b = ballBody
+        b.x = x; b.y = y; b.prevX = x; b.prevY = y; b.x0 = x; b.y0 = y
+        b.angle = 0.0; b.angle0 = 0.0
+        b.vx = vx; b.vy = vy; b.angularVelocity = 0.0; b.preVx = vx; b.preVy = vy; b.fx = 0.0; b.fy = 0.0
+        b.awake = true; b.sleepTime = 0.0
+        b.lineMask = 0; b.outOfBounds = false
+        b.geom.set(b.shape, x, y, 0.0)
+        bodies[ballSlot] = b
+        if (ballSlot >= highWater) highWater = ballSlot + 1
+        val s = ball
+        s.mode = BallRecord.MODE_LOOSE
+        s.x = x; s.y = y; s.z = 0.0; s.vx = vx; s.vy = vy; s.vz = 0.0
+    }
+
+    /** The loose ball leaves the ground (picked up or put back in the air); bodies resting on it wake. */
+    private fun removeBallBody() {
+        val b = ballBody
+        for (i in 0 until contactCount) {
+            val c = contacts[i]
+            if (c.a === b) wake(c.b!!) else if (c.b === b) wake(c.a!!)
+        }
+        val s = ball
+        s.x = b.x; s.y = b.y; s.z = 0.0; s.vx = b.vx; s.vy = b.vy; s.vz = 0.0
+        bodies[ballSlot] = null
+    }
+
+    /**
+     * Phase 8. A ball in the air flies one tick (drag, wind, gravity), checking the goal posts, the end-line planes and
+     * the ground along the way, then the catch windows. A loose ball mirrors its body; a carried one follows the carrier.
+     * Events, in time order within the tick: KickResult (posts and planes) and BallBounce, then CatchOpportunity by id.
+     */
     private fun ballFlight() {
-        // M6: 2.5D ball.
+        val s = ball
+        s.prevX = s.x; s.prevY = s.y; s.prevZ = s.z
+        when (s.mode) {
+            BallRecord.MODE_AIRBORNE -> flyBall()
+            BallRecord.MODE_LOOSE -> {
+                val b = ballBody
+                s.prevX = b.prevX; s.prevY = b.prevY
+                s.x = b.x; s.y = b.y; s.z = 0.0; s.vx = b.vx; s.vy = b.vy; s.vz = 0.0
+            }
+            BallRecord.MODE_CARRIED -> carryBall()
+        }
+    }
+
+    private fun flyBall() {
+        val s = ball
+        val p = fp
+        p.set(s.x, s.y, s.z, s.vx, s.vy, s.vz)
+        val k = flight.k(s.flightMode)
+        val t1 = tick + 1
+        var remaining = WorldConfig.DT
+        var pass = 0
+        while (remaining > 0.0 && pass < MAX_FLIGHT_PASSES) {
+            pass++
+            val x0 = p.x; val y0 = p.y; val z0 = p.z
+            val vx0 = p.vx; val vy0 = p.vy; val vz0 = p.vz
+            val tl = flight.tick(p, k, remaining, 0.0)
+            val used = if (tl >= 0.0) tl else remaining
+            // The goal posts, along the straight piece from the start to where the ball got (the ground, if it landed).
+            val hit = if (config.goalPosts) posts.sweep(x0, y0, z0, p.x - x0, p.y - y0, p.z - z0) else -1
+            if (hit >= 0) {
+                val u = posts.t
+                p.x = x0 + u * (p.x - x0); p.y = y0 + u * (p.y - y0); p.z = z0 + u * (p.z - z0)
+                p.vx = vx0 + u * (p.vx - vx0); p.vy = vy0 + u * (p.vy - vy0); p.vz = vz0 + u * (p.vz - vz0)
+                endLinePlanes(x0, y0, z0, p.x, p.y, p.z, t1)
+                bounceOffPost(p, posts.nx, posts.ny, posts.nz)
+                kickResult(KickResult.HitPost, p.x, p.y, p.z, if (hit < posts.count / 2) FieldLine.HOME_END_LINE else FieldLine.AWAY_END_LINE, t1)
+                remaining -= u * used
+                continue
+            }
+            endLinePlanes(x0, y0, z0, p.x, p.y, p.z, t1)
+            remaining = if (tl >= 0.0) remaining - tl else 0.0
+            if (tl >= 0.0 && bounceOnGround(p, t1)) return // it rolls on as the loose ball
+        }
+        if (p.z < 0.0) p.z = 0.0 // only after a post hit right at the ground used up the tick's pieces
+        s.x = p.x; s.y = p.y; s.z = p.z; s.vx = p.vx; s.vy = p.vy; s.vz = p.vz
+        catchWindows(t1)
+    }
+
+    /** Reflects the ball off a post (normal n, outward) with the ball–structure restitution and friction. */
+    private fun bounceOffPost(p: FlightPoint, nx: Double, ny: Double, nz: Double) {
+        val vn = p.vx * nx + p.vy * ny + p.vz * nz
+        if (vn >= 0.0) return
+        val mats = config.materials
+        val e = mats.restitution(Material.BALL, Material.STRUCTURE)
+        val mu = mats.friction(Material.BALL, Material.STRUCTURE)
+        var tx = p.vx - vn * nx; var ty = p.vy - vn * ny; var tz = p.vz - vn * nz
+        val vt = DMath.sqrt(tx * tx + ty * ty + tz * tz)
+        if (vt > 0.0) {
+            val f = (vt - DMath.min(mu * (1.0 + e) * -vn, ROLL_FRACTION * vt)) / vt
+            tx *= f; ty *= f; tz *= f
+        }
+        p.vx = tx - e * vn * nx; p.vy = ty - e * vn * ny; p.vz = tz - e * vn * nz
+    }
+
+    /**
+     * The ball reached the ground at [p]: it keeps e × its vertical speed (turf restitution × the surface's bounce),
+     * loses ground speed to friction, and a real bounce (at least [BallConfig.minBounceSpeed] coming down) turns it by
+     * a seeded random yaw, as a prolate ball does. Returns true when it stays down and rolls on as the loose ball.
+     */
+    private fun bounceOnGround(p: FlightPoint, t: Long): Boolean {
+        val c = config.ball
+        val mats = config.materials
+        val vzIn = -p.vz // ≥ 0: coming down
+        val e = mats.restitution(Material.BALL, Material.TURF) * surface.ballBounceMultiplier
+        val mu = mats.friction(Material.BALL, Material.TURF)
+        val ev = eventReader.add(EventReader.T_BALL_BOUNCE, t, ballId.value)
+        setPointNormal(ev, p.x, p.y, 0.0, 0.0)
+        eventReader.setDouble(ev, EventReader.D_VALUE, DMath.sqrt(p.vx * p.vx + p.vy * p.vy + p.vz * p.vz))
+        val vh = DMath.hypot2(p.vx, p.vy)
+        if (vh > 0.0) {
+            val f = (vh - DMath.min(mu * (1.0 + e) * vzIn, ROLL_FRACTION * vh)) / vh
+            p.vx *= f; p.vy *= f
+        }
+        if (vzIn >= c.minBounceSpeed && c.bounceYawMax > 0.0) {
+            val yaw = rng.nextDouble(-c.bounceYawMax, c.bounceYawMax)
+            val cs = DMath.cos(yaw); val sn = DMath.sin(yaw)
+            val vx = p.vx
+            p.vx = cs * vx - sn * p.vy
+            p.vy = sn * vx + cs * p.vy
+        }
+        p.z = 0.0
+        val up = e * vzIn
+        if (up < c.minBounceSpeed) {
+            insertBallBody(p.x, p.y, p.vx, p.vy)
+            return true
+        }
+        p.vz = up
+        return false
+    }
+
+    /** KickResult for each end-line plane the piece (x0, y0, z0)→(x1, y1, z1) crosses. */
+    private fun endLinePlanes(x0: Double, y0: Double, z0: Double, x1: Double, y1: Double, z1: Double, t: Long) {
+        plane(0.0, FieldLine.HOME_END_LINE, x0, y0, z0, x1, y1, z1, t)
+        plane(field.lengthM, FieldLine.AWAY_END_LINE, x0, y0, z0, x1, y1, z1, t)
+    }
+
+    private fun plane(px: Double, line: Int, x0: Double, y0: Double, z0: Double, x1: Double, y1: Double, z1: Double, t: Long) {
+        val dir = if (x0 < px && x1 >= px) 1 else if (x0 > px && x1 <= px) -1 else return
+        val u = (px - x0) / (x1 - x0)
+        val y = y0 + u * (y1 - y0)
+        val z = z0 + u * (z1 - z0)
+        val off = y - field.widthM / 2
+        val half = field.uprightSpacingM / 2
+        val result = when {
+            off > half -> if (dir > 0) KickResult.WideLeft else KickResult.WideRight
+            off < -half -> if (dir > 0) KickResult.WideRight else KickResult.WideLeft
+            z > field.crossbarHeightM -> KickResult.Good
+            else -> KickResult.Short
+        }
+        kickResult(result, px, y, z, line, t)
+    }
+
+    private fun kickResult(result: KickResult, x: Double, y: Double, z: Double, line: Int, t: Long) {
+        val e = eventReader.add(EventReader.T_KICK_RESULT, t, ballId.value)
+        eventReader.setInt(e, EventReader.I_KICK, result.ordinal)
+        eventReader.setInt(e, EventReader.I_LINE, line)
+        setPointNormal(e, x, y, 0.0, 0.0)
+        eventReader.setDouble(e, EventReader.D_PZ, z)
+    }
+
+    /** CatchOpportunity for each player the ball has just come within reach of, in id order. */
+    private fun catchWindows(t: Long) {
+        val s = ball
+        val minZ = config.ball.catchMinHeight
+        for (i in 0 until highWater) {
+            val b = bodies[i] ?: continue
+            if (b.reachRadius <= 0.0) continue
+            val dx = s.x - b.x; val dy = s.y - b.y
+            val inside = s.z >= minZ && s.z <= b.reachHeight && dx * dx + dy * dy <= b.reachRadius * b.reachRadius
+            if (inside && !b.inCatch) {
+                val e = eventReader.add(EventReader.T_CATCH, t, b.id)
+                setPointNormal(e, s.x, s.y, 0.0, 0.0)
+                eventReader.setDouble(e, EventReader.D_PZ, s.z)
+                val vh = DMath.hypot2(s.vx, s.vy)
+                eventReader.setDouble(e, EventReader.D_VALUE, DMath.sqrt(vh * vh + s.vz * s.vz))
+                eventReader.setDouble(e, EventReader.D_ANGLE_A, DMath.wrapPi(DMath.atan2(s.vy, s.vx) - b.angle))
+                eventReader.setDouble(e, EventReader.D_ANGLE_B, DMath.atan2(-s.vz, vh))
+            }
+            b.inCatch = inside
+        }
+    }
+
+    // ---------------------------------------------------------------- continuous collision (2D)
+
+    private val sweepHit = RayResult()
+
+    /**
+     * After the solver: the loose ball and every `bullet` body (circles) sweep from where they started the step to where
+     * they ended against static segments and polygons (static bodies, runoff walls, post bases). A body that would have
+     * passed through one stops where it first touches, and bounces with the pair's restitution. Bodies that start the
+     * step touching are left to the contact solver.
+     */
+    private fun continuousCollision() {
+        val threshold = config.restitutionThreshold
+        val mats = config.materials
+        for (i in 0 until highWater) {
+            val b = bodies[i] ?: continue
+            if (!b.bullet || b.type != BodyType.Dynamic || !b.awake) continue
+            val shape = b.shape
+            if (shape !is ShapeDef.Circle || shape.sensor) continue
+            val dx = b.x - b.x0; val dy = b.y - b.y0
+            if (dx == 0.0 && dy == 0.0) continue
+            val r = DMath.max(shape.radius - TOUCH_SLOP, 0.5 * shape.radius)
+            val minX = DMath.min(b.x0, b.x) - r; val maxX = DMath.max(b.x0, b.x) + r
+            val minY = DMath.min(b.y0, b.y) - r; val maxY = DMath.max(b.y0, b.y) + r
+            var best = 2.0
+            var nx = 0.0; var ny = 0.0; var mat = 0
+            for (p in 0 until highWater + walls.size) {
+                val o = if (p < highWater) bodies[p] else if (wallOn[p - highWater]) walls[p - highWater] else null
+                if (o == null || o.type != BodyType.Static || o.sensor) continue
+                if ((b.categoryBits and o.maskBits) == 0 || (o.categoryBits and b.maskBits) == 0) continue
+                val g = o.geom
+                if (g.minX > maxX || g.maxX < minX || g.minY > maxY || g.maxY < minY) continue
+                if (!RayCast.cast(g, r, b.x0, b.y0, dx, dy, sweepHit)) continue
+                if (sweepHit.t <= 0.0 || sweepHit.t >= best) continue
+                best = sweepHit.t; nx = sweepHit.nx; ny = sweepHit.ny; mat = o.material
+            }
+            if (best > 1.0) continue
+            b.x = b.x0 + best * dx; b.y = b.y0 + best * dy
+            val vn = b.vx * nx + b.vy * ny
+            if (vn < 0.0) {
+                val e = if (-vn > threshold) mats.restitution(b.material, mat) else 0.0
+                b.vx -= (1.0 + e) * vn * nx; b.vy -= (1.0 + e) * vn * ny
+            }
+        }
     }
 
     // ---------------------------------------------------------------- events phase
@@ -1271,21 +1725,26 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
         h = Fnv1a64.mixDouble(h, ball.vy)
         h = Fnv1a64.mixDouble(h, ball.vz)
         h = Fnv1a64.mixLong(h, ball.mode.toLong())
+        h = Fnv1a64.mixLong(h, ball.flightMode.toLong())
         h = Fnv1a64.mixLong(h, tick)
         return h
     }
 
+    /** The engine's own statics, indexed by [ContactView] wall number: four runoff walls, then the two post bases. */
     private fun makeWalls(): Array<Body> {
         val f = field
         val x0 = -f.runoffM
         val y0 = -f.runoffM
         val x1 = f.lengthM + f.runoffM
         val y1 = f.widthM + f.runoffM
+        val base = ShapeDef.box(f.goalPostBaseHalfM, f.goalPostBaseHalfM)
         val shapes = arrayOf(
             ShapeDef.Segment(x0, y0, x1, y0), // WALL_NEAR
             ShapeDef.Segment(x0, y1, x1, y1), // WALL_FAR
             ShapeDef.Segment(x0, y0, x0, y1), // WALL_HOME
             ShapeDef.Segment(x1, y0, x1, y1), // WALL_AWAY
+            base, // POST_HOME
+            base, // POST_AWAY
         )
         return Array(shapes.size) { k ->
             val w = Body(-1 - k, BodyType.Static, shapes[k])
@@ -1293,7 +1752,9 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
             w.maskBits = Category.ALL
             w.material = Material.STRUCTURE
             w.extent = shapeExtent(w.shape)
-            w.geom.set(w.shape, 0.0, 0.0, 0.0)
+            if (k == ContactView.POST_HOME) { w.x = -f.goalPostOffsetM; w.y = f.widthM / 2 }
+            if (k == ContactView.POST_AWAY) { w.x = f.lengthM + f.goalPostOffsetM; w.y = f.widthM / 2 }
+            w.geom.set(w.shape, w.x, w.y, 0.0)
             w
         }
     }
@@ -1311,6 +1772,18 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
 
         /** Runoff walls sort after every body id (ids are non-negative Ints). */
         const val WALL_KEY_BASE = 0x80000000L
+
+        /** Spin damping of the loose ball (it has no use for spin; this keeps wall glances from leaving it twirling). */
+        const val BALL_SPIN_DAMPING = 2.0
+
+        /**
+         * A bounce's friction can take at most this share of the slip speed along the surface: the point where a hollow
+         * shell (I = ⅔mr²) starts to roll instead of slide, 1 / (1 + mr²/I) = 0.4.
+         */
+        const val ROLL_FRACTION = 0.4
+
+        /** Straight pieces the ball's tick may be split into by post hits and bounces. */
+        const val MAX_FLIGHT_PASSES = 4
 
         /** Largest distance from the body origin to any point of [shape]. */
         fun shapeExtent(shape: ShapeDef): Double = when (shape) {

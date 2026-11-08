@@ -21,12 +21,17 @@ private val SensorColorMark = Color(0xFF80D8FF)
 private val BreakColor = Color(0xFFFF5252)
 private val ShedColor = Color(0xFFB388FF)
 private val DownColor = Color(0xFFFFFFFF)
+private val KickColor = Color(0xFFFFD740)
+private val CatchColor = Color(0xFF69F0AE)
+private val BounceColor = Color(0xFFFFCC80)
 
 /**
  * Event markers from [ViewerState.markers], fading out over [ViewerState.MARKER_TICKS]: an expanding orange ring
  * for a hit, a magenta cross for a trip, yellow dots along a slipping player's path, a red box when a player goes
  * out, a gold diamond where a goal line was crossed, a small cyan ring when a body touches a field line, a red burst
- * where a grapple broke, a violet burst where a block was shed, and a white box around a player who went down.
+ * where a grapple broke, a violet burst where a block was shed, a white box around a player who went down, a gold star
+ * where the ball met the posts or an end-line plane, a green ring around a player with a catch chance, and an
+ * expanding tan ring where the ball bounced.
  */
 fun DrawScope.drawEvents(t: ViewTransform, s: ViewerState, text: TextMeasurer) {
     val now = s.world.tick
@@ -78,6 +83,27 @@ fun DrawScope.drawEvents(t: ViewTransform, s: ViewerState, text: TextMeasurer) {
                 val h = t.len(0.55).coerceAtLeast(7f)
                 drawRect(DownColor.copy(alpha = fade), Offset(c.x - h, c.y - h), Size(2 * h, 2 * h), style = Stroke(width = 2f))
                 label(text, m.label, c, h, DownColor, fade, below = true)
+            }
+            EventType.KickResult -> {
+                // A gold star where the ball met the posts or an end-line plane, labeled with the result.
+                val col = KickColor.copy(alpha = fade)
+                val r0 = t.len(0.2).coerceAtLeast(4f)
+                val r1 = r0 + t.len(0.5).coerceAtLeast(8f)
+                for (k in 0 until 6) {
+                    val ang = k * Math.PI / 3
+                    val dx = Math.cos(ang).toFloat(); val dy = Math.sin(ang).toFloat()
+                    drawLine(col, Offset(c.x + dx * r0, c.y + dy * r0), Offset(c.x + dx * r1, c.y + dy * r1), strokeWidth = 3f)
+                }
+                label(text, m.label, c, r1, KickColor, fade)
+            }
+            EventType.CatchOpportunity -> {
+                val r = t.len(1.0).coerceAtLeast(8f)
+                drawCircle(CatchColor.copy(alpha = fade), r, c, style = Stroke(width = 2.5f))
+                label(text, m.label, c, r, CatchColor, fade, below = true)
+            }
+            EventType.BallBounce -> {
+                val r = t.len(0.25 + 0.6 * age).coerceAtLeast(4f)
+                drawCircle(BounceColor.copy(alpha = fade), r, c, style = Stroke(width = 2f))
             }
             EventType.SensorBegin -> drawCircle(SensorColorMark.copy(alpha = 0.7f * fade), t.len(0.25).coerceAtLeast(4f), c, style = Stroke(width = 1.5f))
             else -> {}

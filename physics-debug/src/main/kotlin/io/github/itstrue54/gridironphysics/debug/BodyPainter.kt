@@ -36,6 +36,7 @@ fun DrawScope.drawBodies(t: ViewTransform, s: ViewerState) {
     val a = s.alpha
     for (i in 0 until n) {
         val id = BodyId(ids[i])
+        if (id == w.ballId) continue // the loose ball is drawn by drawBall
         val b = w.body(id)
         val x = b.prevX + (b.x - b.prevX) * a
         val y = b.prevY + (b.y - b.prevY) * a

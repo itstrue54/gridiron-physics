@@ -1,5 +1,7 @@
 package io.github.itstrue54.gridironphysics
 
+import io.github.itstrue54.gridironphysics.math.Vec3
+
 /**
  * Sees every state-changing call the game makes on a [World], stamped with the tick it happened on.
  * Replays (M7) are built from this log, so every new public mutator must add a method here.
@@ -28,4 +30,10 @@ interface CommandRecorder {
     fun onDestroyJoint(tick: Long, id: JointId)
     fun onSetBallCarrier(tick: Long, id: BodyId?)
     fun onSetAttackDirection(tick: Long, direction: Int)
+
+    /** [from] and [velocity] are the caller's objects and only valid during this call: copy the values. */
+    fun onLaunchBall(tick: Long, from: Vec3, velocity: Vec3, mode: FlightMode)
+    fun onDeflect(tick: Long, id: BodyId, impulseX: Double, impulseY: Double, impulseZ: Double)
+    fun onSetWind(tick: Long, x: Double, y: Double)
+    fun onSetReach(tick: Long, id: BodyId, reachRadius: Double, reachHeight: Double)
 }

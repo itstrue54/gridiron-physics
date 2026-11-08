@@ -52,6 +52,7 @@ import androidx.compose.ui.window.WindowPlacement
 import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import io.github.itstrue54.gridironphysics.BallState
 import io.github.itstrue54.gridironphysics.scenarios.Scenario
 import io.github.itstrue54.gridironphysics.scenarios.Scenarios
 
@@ -126,6 +127,7 @@ fun ViewerApp(initial: Scenario = Scenarios.all.first(), showColliders: Boolean 
                 drawForwardProgress(t, state, textMeasurer)
                 drawJoints(t, state, textMeasurer)
                 drawBodies(t, state)
+                drawBall(t, state, textMeasurer)
                 drawContacts(t, state, textMeasurer)
                 drawEvents(t, state, textMeasurer)
             }
@@ -196,6 +198,19 @@ private fun InspectPanel(state: ViewerState, frameNo: Long) {
         Text("contacts ${state.world.contactCount}   joints ${state.world.jointCount}", fontFamily = FontFamily.Monospace, fontSize = 12.sp)
         val fp = state.world.forwardProgressX
         if (!fp.isNaN()) Text("forward progress x = ${"%.2f".format(fp)} m", fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+        val ball = state.world.ball()
+        if (ball.state != BallState.Dead || state.ballTrail.isNotEmpty()) {
+            val mode = if (ball.state == BallState.Airborne) " " + ball.flightMode.name else ""
+            Text("ball " + ball.state.name + mode, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+            val speed = Math.sqrt(ball.vx * ball.vx + ball.vy * ball.vy + ball.vz * ball.vz)
+            Text(
+                "  (%.1f, %.1f) z %.2f m  %.1f m/s".format(ball.x, ball.y, ball.z, speed),
+                fontFamily = FontFamily.Monospace, fontSize = 12.sp, maxLines = 1, softWrap = false,
+            )
+        }
+        val wx = state.world.windX
+        val wy = state.world.windY
+        if (wx != 0.0 || wy != 0.0) Text("wind (%.1f, %.1f) m/s".format(wx, wy), fontFamily = FontFamily.Monospace, fontSize = 12.sp)
         Spacer(Modifier.width(1.dp).padding(4.dp))
         Text("events (newest first)", fontSize = 13.sp)
         state.eventLog.forEach { Text(it, fontFamily = FontFamily.Monospace, fontSize = 11.sp, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) }

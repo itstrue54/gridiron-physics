@@ -73,6 +73,14 @@ fun DrawScope.drawField(t: ViewTransform, text: TextMeasurer) {
     val half = f.uprightSpacingM / 2
     val mid = f.widthM / 2
     for (x in doubleArrayOf(0.0, f.lengthM)) {
+        // Gooseneck: an arm from the crossbar back to the pole on its padded base behind the end line.
+        val back = if (x == 0.0) -f.goalPostOffsetM else f.goalPostOffsetM
+        val bx = t.toScreenX(x + back)
+        val by = t.toScreenY(mid)
+        val bh = t.len(f.goalPostBaseHalfM)
+        drawRect(Color(0xFF455A64), Offset(bx - bh, by - bh), Size(2 * bh, 2 * bh))
+        drawLine(Color.Yellow, Offset(t.toScreenX(x), by), Offset(bx, by), strokeWidth = 3f)
+        drawCircle(Color.Yellow, t.len(0.12).coerceAtLeast(2f), Offset(bx, by))
         drawLine(Color.Yellow, Offset(t.toScreenX(x), t.toScreenY(mid - half)), Offset(t.toScreenX(x), t.toScreenY(mid + half)), strokeWidth = 4f)
         drawCircle(Color.Yellow, t.len(0.15).coerceAtLeast(2f), Offset(t.toScreenX(x), t.toScreenY(mid - half)))
         drawCircle(Color.Yellow, t.len(0.15).coerceAtLeast(2f), Offset(t.toScreenX(x), t.toScreenY(mid + half)))
