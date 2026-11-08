@@ -144,11 +144,6 @@ internal class LocomotionController(params: AthleteParams) {
         /** A point intent counts as reached inside this distance (m). */
         const val ARRIVE_RADIUS = 0.01
 
-        /** Wraps an angle to (−π, π]. */
-        fun wrap(a: Double): Double {
-            var r = a - 2.0 * DMath.PI * DMath.floor((a + DMath.PI) / (2.0 * DMath.PI))
-            if (r <= -DMath.PI) r += 2.0 * DMath.PI
-            return r
-        }
+        fun wrap(a: Double): Double = DMath.wrapPi(a)
     }
 }

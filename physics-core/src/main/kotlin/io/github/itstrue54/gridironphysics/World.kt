@@ -6,10 +6,14 @@ import io.github.itstrue54.gridironphysics.internal.BroadPhase
 import io.github.itstrue54.gridironphysics.internal.BruteForceBroadPhase
 import io.github.itstrue54.gridironphysics.internal.Collide
 import io.github.itstrue54.gridironphysics.internal.Contact
+import io.github.itstrue54.gridironphysics.internal.Geom
 import io.github.itstrue54.gridironphysics.internal.LocomotionController
+import io.github.itstrue54.gridironphysics.internal.RayCast
+import io.github.itstrue54.gridironphysics.internal.RayResult
 import io.github.itstrue54.gridironphysics.math.DMath
 import io.github.itstrue54.gridironphysics.math.Fnv1a64
 import io.github.itstrue54.gridironphysics.math.SplitMix64
+import io.github.itstrue54.gridironphysics.math.Vec2
 
 /**
  * The simulation. Advances in fixed 1/60 s ticks; the same seed and the same calls produce the same
@@ -108,6 +112,9 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
         }
         b.geom.set(b.shape, b.x, b.y, b.angle)
         b.x0 = b.x; b.y0 = b.y; b.angle0 = b.angle
+        // A body starts wherever it is: being created on a line or out of bounds is not an event.
+        b.lineMask = lineOverlap(b.geom)
+        b.outOfBounds = outOfBounds(b.geom)
         bodies[slot] = b
         liveCount++
         if (slot >= highWater) highWater = slot + 1
@@ -241,31 +248,6 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
         }
     }
 
-    // ---------------------------------------------------------------- slip (temporary, until M4's EventReader)
-
-    // A Slip is reported when an intent asks for more horizontal acceleration than traction allows; the engine
-    // clamps it and the game decides whether that is a stumble. These three accessors are a stopgap: M4 replaces
-    // them with Slip events in the event ring buffer.
-
-    private val slipIds = IntArray(config.maxBodies)
-    private val slipExcesses = DoubleArray(config.maxBodies)
-
-    /** TEMPORARY (M3, replaced by M4's EventReader): number of Slip reports from the last step. */
-    var slipCount: Int = 0
-        private set
-
-    /** TEMPORARY (M3): body of Slip report [index]. Reports are in ascending body id order. */
-    fun slipBody(index: Int): BodyId {
-        require(index in 0 until slipCount) { "slip $index out of range 0 until $slipCount" }
-        return BodyId(slipIds[index])
-    }
-
-    /** TEMPORARY (M3): acceleration (m/s²) the intent asked for beyond the traction limit in report [index]. */
-    fun slipExcess(index: Int): Double {
-        require(index in 0 until slipCount) { "slip $index out of range 0 until $slipCount" }
-        return slipExcesses[index]
-    }
-
     // ---------------------------------------------------------------- contacts
 
     /**
@@ -280,6 +262,101 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
         require(index in 0 until contactCount) { "contact $index out of range 0 until $contactCount" }
         contactView.c = contacts[index]
         return contactView
+    }
+
+    // ---------------------------------------------------------------- events
+
+    private val eventReader = EventReader(config.eventCapacity)
+
+    /**
+     * The event stream: contacts, hits, trips, slips and field-line crossings. Drain it after each [step] or
+     * [advance]; unread events stay until the buffer is full. Always returns the same reader. See [EventReader].
+     */
+    fun events(): EventReader = eventReader
+
+    // ---------------------------------------------------------------- queries
+
+    // Queries read the world as of the end of the last step (shapes are refreshed there), never change it and
+    // never allocate. They see bodies only: runoff walls are not reported. Ties go to the lower body id.
+
+    private val ray = RayResult()
+    private val nearDist = DoubleArray(config.maxBodies)
+
+    private fun passes(b: Body, f: QueryFilter): Boolean =
+        (b.categoryBits and f.maskBits) != 0 && b.id != f.ignore && (f.includeSensors || !b.sensor)
+
+    /** The first body the segment [from]→[to] hits, written to [out]. Returns false when it hits nothing. */
+    fun raycast(from: Vec2, to: Vec2, filter: QueryFilter, out: RayHit): Boolean = cast(from, to, 0.0, filter, out)
+
+    /**
+     * Sweeps a circle of [radius] from [from] to [to] and reports the first body it touches; [RayHit.pointX] is the
+     * circle's center at that moment. A circle that starts overlapping a body hits it at fraction 0.
+     */
+    fun circleCast(from: Vec2, to: Vec2, radius: Double, filter: QueryFilter, out: RayHit): Boolean {
+        require(radius.isFinite() && radius >= 0.0) { "radius must be finite and >= 0: $radius" }
+        return cast(from, to, radius, filter, out)
+    }
+
+    private fun cast(from: Vec2, to: Vec2, radius: Double, filter: QueryFilter, out: RayHit): Boolean {
+        val ox = from.x; val oy = from.y
+        val dx = to.x - ox; val dy = to.y - oy
+        require(ox.isFinite() && oy.isFinite() && dx.isFinite() && dy.isFinite()) { "cast points must be finite" }
+        require(dx != 0.0 || dy != 0.0) { "cast needs from != to" }
+        val rMinX = DMath.min(ox, to.x) - radius; val rMaxX = DMath.max(ox, to.x) + radius
+        val rMinY = DMath.min(oy, to.y) - radius; val rMaxY = DMath.max(oy, to.y) + radius
+        var best = Double.MAX_VALUE
+        for (i in 0 until highWater) {
+            val b = bodies[i] ?: continue
+            if (!passes(b, filter)) continue
+            val g = b.geom
+            if (g.minX > rMaxX || g.maxX < rMinX || g.minY > rMaxY || g.maxY < rMinY) continue
+            if (!RayCast.cast(g, radius, ox, oy, dx, dy, ray) || ray.t >= best) continue
+            best = ray.t
+            out.body = BodyId(b.id); out.fraction = ray.t
+            out.pointX = ox + ray.t * dx; out.pointY = oy + ray.t * dy
+            out.normalX = ray.nx; out.normalY = ray.ny
+        }
+        return best != Double.MAX_VALUE
+    }
+
+    /**
+     * Writes the ids ([BodyId.value]) of bodies whose shape bounds overlap the box, in ascending id order, and
+     * returns how many. Stops when [out] is full.
+     */
+    fun queryAabb(minX: Double, minY: Double, maxX: Double, maxY: Double, filter: QueryFilter, out: IntArray): Int {
+        require(minX <= maxX && minY <= maxY) { "empty box: ($minX, $minY)-($maxX, $maxY)" }
+        var n = 0
+        for (i in 0 until highWater) {
+            if (n == out.size) break
+            val b = bodies[i] ?: continue
+            if (!passes(b, filter)) continue
+            val g = b.geom
+            if (g.minX > maxX || g.maxX < minX || g.minY > maxY || g.maxY < minY) continue
+            out[n++] = b.id
+        }
+        return n
+    }
+
+    /**
+     * Writes the ids ([BodyId.value]) of up to [count] bodies nearest [p] (by center distance) into [out], nearest
+     * first, and returns how many. [count] must fit in [out].
+     */
+    fun nearestBodies(p: Vec2, count: Int, filter: QueryFilter, out: IntArray): Int {
+        require(count in 0..out.size) { "count must be in 0..${out.size}: $count" }
+        if (count == 0) return 0
+        var n = 0
+        for (i in 0 until highWater) {
+            val b = bodies[i] ?: continue
+            if (!passes(b, filter)) continue
+            val dx = b.x - p.x; val dy = b.y - p.y
+            val d2 = dx * dx + dy * dy
+            if (n == count && d2 >= nearDist[n - 1]) continue
+            // Insertion sort. A later (higher) id goes after an equal distance, so ties stay in id order.
+            var k = if (n == count) n - 1 else n++
+            while (k > 0 && nearDist[k - 1] > d2) { nearDist[k] = nearDist[k - 1]; out[k] = out[k - 1]; k-- }
+            nearDist[k] = d2; out[k] = b.id
+        }
+        return n
     }
 
     // ---------------------------------------------------------------- frame accumulator
@@ -330,7 +407,6 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
 
     /** Each awake player's locomotion controller turns its intent into a force, clamped by traction. */
     private fun applyIntents() {
-        slipCount = 0
         val surfaceGrip = surface.tractionMultiplier * config.gravity
         val slideGrip = config.slideFriction * surfaceGrip
         for (i in 0 until highWater) {
@@ -339,9 +415,8 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
             if (!b.awake) continue
             c.drive(b, c.params.traction * surfaceGrip, slideGrip)
             if (c.slip > 0.0) {
-                slipIds[slipCount] = b.id
-                slipExcesses[slipCount] = c.slip
-                slipCount++
+                val e = eventReader.add(EventReader.T_SLIP, tick + 1, b.id)
+                eventReader.setDouble(e, EventReader.D_VALUE, c.slip)
             }
         }
     }
@@ -359,11 +434,18 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
             b.vy *= 1.0 / (1.0 + dt * b.linearDamping)
             b.angularVelocity *= 1.0 / (1.0 + dt * b.angularDamping)
         }
+        for (i in 0 until highWater) {
+            val b = bodies[i] ?: continue
+            b.preVx = b.vx; b.preVy = b.vy
+        }
     }
 
     private fun proxyBody(p: Int): Body = if (p < highWater) bodies[p]!! else walls[p - highWater]
 
-    /** Refreshes world-space shapes and fat AABBs, then finds candidate pairs in (lower id, higher id) order. */
+    /**
+     * Builds fat AABBs, then finds candidate pairs in (lower id, higher id) order. World-space shapes are already
+     * current: the end of the last step (or createBody / setStance) refreshed them.
+     */
     private fun broadPhase() {
         val dt = WorldConfig.DT
         val n = highWater + wallCount
@@ -372,7 +454,6 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
             if (b == null) { proxyActive[p] = false; continue }
             proxyActive[p] = true
             b.x0 = b.x; b.y0 = b.y; b.angle0 = b.angle
-            if (b.type != BodyType.Static) b.geom.set(b.shape, b.x, b.y, b.angle)
             b.speedBound = if (b.active) DMath.hypot2(b.vx, b.vy) + DMath.abs(b.angularVelocity) * b.extent else 0.0
             val fat = 0.5 * Collide.SPECULATIVE + b.speedBound * dt
             val g = b.geom
@@ -598,8 +679,238 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
         // M6: 2.5D ball.
     }
 
+    // ---------------------------------------------------------------- events phase
+
+    // Pairs that were touching at the end of the last step, sorted by contact key. A pair stays here while both
+    // bodies sleep (sleeping pairs are not re-collided), so falling asleep is not a ContactEnd. Double-buffered.
+    private val touchCap = 2 * config.maxContacts
+    private var touchKey = LongArray(touchCap)
+    private var touchA = IntArray(touchCap)
+    private var touchB = IntArray(touchCap)
+    private var touchSensor = BooleanArray(touchCap)
+    private var touchCount = 0
+    private var nextKey = LongArray(touchCap)
+    private var nextA = IntArray(touchCap)
+    private var nextB = IntArray(touchCap)
+    private var nextSensor = BooleanArray(touchCap)
+    private var nextCount = 0
+
+    /**
+     * Phase 9. Refreshes world-space shapes at the new positions (queries and the next broad phase use them), then
+     * reports contact begin/end (with Hit and Trip), field-line sensors, out of bounds and goal-line crossings.
+     * Events are written in a fixed order: contacts by key, then each body's line events by ascending id.
+     */
     private fun emitEvents() {
-        // M4: event ring buffer.
+        for (i in 0 until highWater) {
+            val b = bodies[i] ?: continue
+            if (b.type != BodyType.Static) b.geom.set(b.shape, b.x, b.y, b.angle)
+        }
+        emitContactEvents()
+        emitLineEvents()
+    }
+
+    private fun emitContactEvents() {
+        val t = tick + 1
+        nextCount = 0
+        var i = 0
+        var j = 0
+        while (i < contactCount || j < touchCount) {
+            val keyC = if (i < contactCount) contacts[i].key else Long.MAX_VALUE
+            val keyO = if (j < touchCount) touchKey[j] else Long.MAX_VALUE
+            if (keyC < keyO) {
+                val c = contacts[i++]
+                if (touching(c)) { keepTouching(c.key, c.idA, c.idB, c.sensor); contactBegin(c, t) }
+            } else if (keyO < keyC) {
+                // Touching last tick, not even a candidate now: either both sides sleep (still touching) or it ended.
+                if (asleepPair(touchA[j], touchB[j])) keepTouching(touchKey[j], touchA[j], touchB[j], touchSensor[j])
+                else contactEnd(touchA[j], touchB[j], touchSensor[j], t)
+                j++
+            } else {
+                val c = contacts[i++]
+                if (touching(c)) keepTouching(c.key, c.idA, c.idB, c.sensor)
+                else contactEnd(touchA[j], touchB[j], touchSensor[j], t)
+                j++
+            }
+        }
+        val k = touchKey; touchKey = nextKey; nextKey = k
+        val a = touchA; touchA = nextA; nextA = a
+        val b = touchB; touchB = nextB; nextB = b
+        val s = touchSensor; touchSensor = nextSensor; nextSensor = s
+        touchCount = nextCount
+    }
+
+    private fun keepTouching(key: Long, a: Int, b: Int, sensor: Boolean) {
+        if (nextCount == touchCap) return // over capacity: the pair is forgotten and may begin again later
+        nextKey[nextCount] = key; nextA[nextCount] = a; nextB[nextCount] = b; nextSensor[nextCount] = sensor
+        nextCount++
+    }
+
+    /** The body with id [id] if it is alive, else null. Walls (negative ids) are not bodies: null. */
+    private fun liveOrNull(id: Int): Body? {
+        if (id < 0) return null
+        val slot = BodyId(id).slot
+        if (slot >= highWater) return null
+        val b = bodies[slot]
+        return if (b != null && b.id == id) b else null
+    }
+
+    private fun asleepPair(a: Int, b: Int): Boolean {
+        val ba = liveOrNull(a) ?: return false
+        if (ba.active) return false
+        if (b < 0) return true // a runoff wall never moves
+        val bb = liveOrNull(b) ?: return false
+        return !bb.active
+    }
+
+    /**
+     * Touching after this step: the solver pushed (normal impulse), or a point's separation, moved along with the
+     * bodies since the narrow phase, is below [TOUCH_SLOP]. Speculative contacts that never closed are not touching.
+     */
+    private fun touching(c: Contact): Boolean {
+        val a = c.a!!; val b = c.b!!
+        val m = c.m
+        val dpx = (b.x - b.x0) - (a.x - a.x0)
+        val dpy = (b.y - b.y0) - (a.y - a.y0)
+        val daA = a.angle - a.angle0
+        val daB = b.angle - b.angle0
+        for (j in 0 until m.count) {
+            if (c.solve && c.normalImpulse[j] > 0.0) return true
+            val dx = dpx - daB * (m.py[j] - b.y0) + daA * (m.py[j] - a.y0)
+            val dy = dpy + daB * (m.px[j] - b.x0) - daA * (m.px[j] - a.x0)
+            if (m.sep[j] + dx * m.nx + dy * m.ny < TOUCH_SLOP) return true
+        }
+        return false
+    }
+
+    private fun contactBegin(c: Contact, t: Long) {
+        val ev = eventReader
+        val m = c.m
+        var px = 0.0; var py = 0.0
+        for (j in 0 until m.count) { px += m.px[j]; py += m.py[j] }
+        px /= m.count; py /= m.count
+        val e = ev.add(EventReader.T_CONTACT_BEGIN, t, c.idA)
+        ev.setInt(e, EventReader.I_B, c.idB)
+        ev.setInt(e, EventReader.I_WALL, c.wall)
+        ev.setInt(e, EventReader.I_SENSOR, if (c.sensor) 1 else 0)
+        setPointNormal(e, px, py, m.nx, m.ny)
+        if (c.sensor || c.wall != ContactView.NO_WALL) return
+        val a = c.a!!; val b = c.b!!
+        if (isPlayer(a) && isPlayer(b)) hit(c, a, b, px, py, t)
+        if (b.stance == Stance.Down && a.stance != Stance.Down && isPlayer(a)) trip(a, b, px, py, m.nx, m.ny, t)
+        else if (a.stance == Stance.Down && b.stance != Stance.Down && isPlayer(b)) trip(b, a, px, py, -m.nx, -m.ny, t)
+    }
+
+    private fun isPlayer(b: Body): Boolean = b.type == BodyType.Dynamic && (b.categoryBits and Category.PLAYERS) != 0
+
+    private fun setPointNormal(e: Int, px: Double, py: Double, nx: Double, ny: Double) {
+        val ev = eventReader
+        ev.setDouble(e, EventReader.D_PX, px); ev.setDouble(e, EventReader.D_PY, py)
+        ev.setDouble(e, EventReader.D_NX, nx); ev.setDouble(e, EventReader.D_NY, ny)
+    }
+
+    private fun hit(c: Contact, a: Body, b: Body, px: Double, py: Double, t: Long) {
+        val ev = eventReader
+        val nx = c.m.nx; val ny = c.m.ny
+        var impulse = 0.0
+        for (j in 0 until c.m.count) impulse += c.normalImpulse[j]
+        val closing = -((b.preVx - a.preVx) * nx + (b.preVy - a.preVy) * ny)
+        val e = ev.add(EventReader.T_HIT, t, a.id)
+        ev.setInt(e, EventReader.I_B, b.id)
+        setPointNormal(e, px, py, nx, ny)
+        ev.setDouble(e, EventReader.D_CLOSING, DMath.max(closing, 0.0))
+        ev.setDouble(e, EventReader.D_IMPULSE, impulse)
+        // A meets the contact along +n, B along −n. Headings are from the start of the step, before impact.
+        ev.setDouble(e, EventReader.D_ANGLE_A, DMath.wrapPi(DMath.atan2(ny, nx) - a.angle0))
+        ev.setDouble(e, EventReader.D_ANGLE_B, DMath.wrapPi(DMath.atan2(-ny, -nx) - b.angle0))
+        ev.setDouble(e, EventReader.D_MAX, a.mass * a.preVx); ev.setDouble(e, EventReader.D_MAY, a.mass * a.preVy)
+        ev.setDouble(e, EventReader.D_MBX, b.mass * b.preVx); ev.setDouble(e, EventReader.D_MBY, b.mass * b.preVy)
+    }
+
+    private fun trip(mover: Body, down: Body, px: Double, py: Double, nx: Double, ny: Double, t: Long) {
+        val speed = DMath.hypot2(mover.preVx, mover.preVy)
+        if (speed < config.tripMinSpeed) return
+        val ev = eventReader
+        val e = ev.add(EventReader.T_TRIP, t, mover.id)
+        ev.setInt(e, EventReader.I_B, down.id)
+        setPointNormal(e, px, py, nx, ny)
+        ev.setDouble(e, EventReader.D_VALUE, speed)
+    }
+
+    private fun contactEnd(a: Int, b: Int, sensor: Boolean, t: Long) {
+        val ev = eventReader
+        val e = ev.add(EventReader.T_CONTACT_END, t, a)
+        ev.setInt(e, EventReader.I_B, b)
+        ev.setInt(e, EventReader.I_WALL, if (b < 0) -1 - b else ContactView.NO_WALL)
+        ev.setInt(e, EventReader.I_SENSOR, if (sensor) 1 else 0)
+    }
+
+    // Field lines are axis-aligned, so a convex shape crosses one exactly when its bounds straddle it. The only
+    // approximation is at the four field corners, where a rotated capsule's or polygon's bounds may reach past
+    // the end of a line its shape does not quite touch.
+
+    private fun lineOverlap(g: Geom): Int {
+        val len = field.lengthM; val wid = field.widthM
+        val alongX = g.maxX >= 0.0 && g.minX <= len
+        val alongY = g.maxY >= 0.0 && g.minY <= wid
+        var m = 0
+        if (alongX && g.minY <= 0.0 && g.maxY >= 0.0) m = m or (1 shl FieldLine.NEAR_SIDELINE)
+        if (alongX && g.minY <= wid && g.maxY >= wid) m = m or (1 shl FieldLine.FAR_SIDELINE)
+        if (alongY && g.minX <= 0.0 && g.maxX >= 0.0) m = m or (1 shl FieldLine.HOME_END_LINE)
+        if (alongY && g.minX <= len && g.maxX >= len) m = m or (1 shl FieldLine.AWAY_END_LINE)
+        val hg = field.homeGoalLineX; val ag = field.awayGoalLineX
+        if (alongY && g.minX <= hg && g.maxX >= hg) m = m or (1 shl FieldLine.HOME_GOAL_LINE)
+        if (alongY && g.minX <= ag && g.maxX >= ag) m = m or (1 shl FieldLine.AWAY_GOAL_LINE)
+        return m
+    }
+
+    /** Touching a sideline or end line is out. */
+    private fun outOfBounds(g: Geom): Boolean =
+        g.minY <= 0.0 || g.maxY >= field.widthM || g.minX <= 0.0 || g.maxX >= field.lengthM
+
+    private fun emitLineEvents() {
+        val t = tick + 1
+        val ev = eventReader
+        for (i in 0 until highWater) {
+            val b = bodies[i] ?: continue
+            if (b.type == BodyType.Static || (b.maskBits and Category.LINE_SENSOR) == 0) continue
+            val g = b.geom
+            val mask = lineOverlap(g)
+            val changed = mask xor b.lineMask
+            if (changed != 0) {
+                for (line in 0 until FieldLine.COUNT) {
+                    if ((changed and (1 shl line)) == 0) continue
+                    val e = ev.add(if ((mask and (1 shl line)) != 0) EventReader.T_SENSOR_BEGIN else EventReader.T_SENSOR_END, t, b.id)
+                    ev.setInt(e, EventReader.I_LINE, line)
+                }
+                b.lineMask = mask
+            }
+            val out = outOfBounds(g)
+            if (out && !b.outOfBounds) {
+                val line = when {
+                    g.minY <= 0.0 -> FieldLine.NEAR_SIDELINE
+                    g.maxY >= field.widthM -> FieldLine.FAR_SIDELINE
+                    g.minX <= 0.0 -> FieldLine.HOME_END_LINE
+                    else -> FieldLine.AWAY_END_LINE
+                }
+                val e = ev.add(EventReader.T_OUT_OF_BOUNDS, t, b.id)
+                ev.setInt(e, EventReader.I_LINE, line)
+            }
+            b.outOfBounds = out
+            goalLine(b, field.homeGoalLineX, FieldLine.HOME_GOAL_LINE, t)
+            goalLine(b, field.awayGoalLineX, FieldLine.AWAY_GOAL_LINE, t)
+        }
+    }
+
+    /** The center crossed x = [gx] this step, between the sidelines. The line itself counts as the far side. */
+    private fun goalLine(b: Body, gx: Double, line: Int, t: Long) {
+        val x0 = b.prevX; val x1 = b.x
+        val dir = if (x0 < gx && x1 >= gx) 1 else if (x0 >= gx && x1 < gx) -1 else return
+        val y = b.prevY + (gx - x0) / (x1 - x0) * (b.y - b.prevY)
+        if (y < 0.0 || y > field.widthM) return
+        val e = eventReader.add(EventReader.T_GOAL_LINE, t, b.id)
+        eventReader.setInt(e, EventReader.I_LINE, line)
+        eventReader.setInt(e, EventReader.I_DIR, dir)
+        setPointNormal(e, gx, y, 0.0, 0.0)
     }
 
     private fun bookkeeping() {
@@ -730,6 +1041,9 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
         /** Lying capsule for Diving and Down, in multiples of the upright radius: 0.34 m → 1.77 m long, 0.20 m thick. */
         const val LYING_HALF_LENGTH = 2.0
         const val LYING_RADIUS = 0.6
+
+        /** Separation (m) below which a contact counts as touching for events (Box2D's linear slop). */
+        const val TOUCH_SLOP = 0.005
 
         /** Runoff walls sort after every body id (ids are non-negative Ints). */
         const val WALL_KEY_BASE = 0x80000000L

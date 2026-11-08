@@ -55,9 +55,9 @@ class M3AcceptanceTest {
             val p = w.createBody(BodyDef(x = 20.0, y = 10.0, vx = ap.maxSpeed, mass = 95.0, shape = ShapeDef.Circle(0.33)))
             w.setAthlete(p, ap)
             w.setIntent(p, LocomotionIntent.velocity(ap.maxSpeed, 0.0))
-            repeat(30) { w.step() }
+            val straight = w.run(30)
             assertEquals(ap.maxSpeed, speed(w, p), 1e-9, "steady at top speed before the cut")
-            assertEquals(0, w.slipCount, "no slip running straight")
+            assertTrue(straight.none { it.type == EventType.Slip }, "no slip running straight")
 
             w.setIntent(p, LocomotionIntent.velocity(0.0, ap.maxSpeed)) // cut 90° to the left
             val limit = ap.traction * surface.tractionMultiplier * w.config.gravity
@@ -69,9 +69,9 @@ class M3AcceptanceTest {
                 val a = DMath.hypot2(w.body(p).vx - vx0, w.body(p).vy - vy0) / WorldConfig.DT
                 assertTrue(a <= limit * (1 + 1e-9), "${surface.name}: horizontal acceleration $a exceeds traction limit $limit")
                 if (a > maxA) maxA = a
-                for (i in 0 until w.slipCount) {
-                    if (w.slipBody(i) == p) {
-                        assertTrue(w.slipExcess(i) > 0.0, "slip excess is positive")
+                for (e in w.drain()) {
+                    if (e.type == EventType.Slip && e.a == p.value) {
+                        assertTrue(e.value > 0.0, "slip excess is positive")
                         slips++
                     }
                 }
