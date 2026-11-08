@@ -48,6 +48,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import io.github.itstrue54.gridironphysics.scenarios.Scenario
 import io.github.itstrue54.gridironphysics.scenarios.Scenarios
 
 fun main() = application {
@@ -64,8 +65,8 @@ fun main() = application {
 
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
-fun ViewerApp() {
-    val state = remember { ViewerState() }
+fun ViewerApp(initial: Scenario = Scenarios.all.first(), showColliders: Boolean = false) {
+    val state = remember { ViewerState(initial).also { it.showColliders = showColliders } }
     // Bumped every frame and on every control action; reading it makes the canvas and panel redraw.
     var frameNo by remember { mutableLongStateOf(0L) }
     val textMeasurer = rememberTextMeasurer()
@@ -152,6 +153,7 @@ private fun TopBar(state: ViewerState, frameNo: Long, changed: () -> Unit) {
         OutlinedButton(onClick = { state.reset(); changed() }) { Text("Reset") }
         FilterChip(selected = state.follow, onClick = { state.follow = !state.follow; changed() }, label = { Text("Follow") })
         OutlinedButton(onClick = { state.showFullField(); changed() }) { Text("Full field") }
+        FilterChip(selected = state.showColliders, onClick = { state.showColliders = !state.showColliders; changed() }, label = { Text("Colliders") })
         Spacer(Modifier.width(16.dp))
         Text("tick ${state.world.tick}   t = ${"%.2f".format(state.world.tick / 60.0)} s   (frame $frameNo)", fontFamily = FontFamily.Monospace)
         Spacer(Modifier.weight(1f))

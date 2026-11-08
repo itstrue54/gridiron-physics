@@ -21,6 +21,9 @@ class ViewerState(scenario: Scenario = Scenarios.all.first()) {
 
     var selected: BodyId? = null
 
+    /** Draw the raw physics shapes over the player figures. A view preference: [reset] keeps it. */
+    var showColliders: Boolean = false
+
     /** Interpolation fraction between the previous and current tick, for drawing. */
     var alpha: Double = 0.0
         private set
@@ -87,10 +90,10 @@ class ViewerState(scenario: Scenario = Scenarios.all.first()) {
 
     companion object {
         /** Smallest side of the follow window (m). */
-        const val MIN_VIEW_M = 12.0
+        const val MIN_VIEW_M = 6.0
 
         /** Margin around the moving bodies (m). */
-        const val PAD_M = 3.0
+        const val PAD_M = 1.5
     }
 
     /** Advances exactly one tick (used while paused). Drawn at the new position, not interpolated. */

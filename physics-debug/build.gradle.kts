@@ -39,5 +39,7 @@ tasks.register<JavaExec>("snapshot") {
     args(
         (project.findProperty("out") as String?) ?: layout.buildDirectory.file("viewer.png").get().asFile.path,
         (project.findProperty("seconds") as String?) ?: "1.5",
+        (project.findProperty("scenario") as String?) ?: "Head-on tackle",
+        (project.findProperty("colliders") as String?) ?: "false",
     )
 }

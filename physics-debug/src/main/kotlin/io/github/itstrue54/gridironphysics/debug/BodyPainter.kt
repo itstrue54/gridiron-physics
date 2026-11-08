@@ -47,15 +47,24 @@ fun DrawScope.drawBodies(t: ViewTransform, s: ViewerState) {
             b.userData == Tags.HOME -> Home
             else -> Prop
         }
-        val fill = if (b.type == BodyType.Dynamic && !b.awake) base.copy(alpha = 0.45f) else base
-        drawShape(t, b, x, y, fill)
-        if (b.userData == Tags.OFFICIAL) {
-            val r = t.len(b.radius)
-            drawLine(Color.Black, Offset(c.x - r * 0.7f, c.y), Offset(c.x + r * 0.7f, c.y), strokeWidth = r * 0.35f)
+        val asleep = b.type == BodyType.Dynamic && !b.awake
+        val fill = if (asleep) base.copy(alpha = 0.45f) else base
+        val shape = b.shape
+        val figure = isFigure(b.userData) && (shape is ShapeDef.Circle || shape is ShapeDef.Capsule)
+        if (figure) {
+            val lying = shape is ShapeDef.Capsule
+            val halfLength = if (shape is ShapeDef.Capsule) t.len(shape.halfLength) else 0f
+            drawPlayerFigure(
+                c, b.angle, t.len(b.radius).coerceAtLeast(3f), if (b.userData == Tags.AWAY) Away else Home,
+                official = b.userData == Tags.OFFICIAL, lying = lying, halfLengthPx = halfLength, alpha = if (asleep) 0.55f else 1f,
+            )
+            if (s.showColliders) drawShape(t, b, x, y, ColliderOutline, outlineOnly = true)
+        } else {
+            drawShape(t, b, x, y, fill)
         }
         val r = t.len(b.radius).coerceAtLeast(2f)
-        // Heading tick (screen y is flipped).
-        if (b.shape !is ShapeDef.Segment) {
+        // Heading tick (screen y is flipped). Figures show their heading already.
+        if (!figure && b.shape !is ShapeDef.Segment) {
             val hx = DMath.cos(b.angle).toFloat()
             val hy = -DMath.sin(b.angle).toFloat()
             drawLine(Color.White, c, Offset(c.x + hx * r, c.y + hy * r), strokeWidth = 2f)
@@ -68,7 +77,9 @@ fun DrawScope.drawBodies(t: ViewTransform, s: ViewerState) {
     }
 }
 
-private fun DrawScope.drawShape(t: ViewTransform, b: BodyView, x: Double, y: Double, fill: Color) {
+private val ColliderOutline = Color(0xFFFFFF00)
+
+private fun DrawScope.drawShape(t: ViewTransform, b: BodyView, x: Double, y: Double, fill: Color, outlineOnly: Boolean = false) {
     val cos = DMath.cos(b.angle)
     val sin = DMath.sin(b.angle)
     fun sx(lx: Double, ly: Double) = t.toScreenX(x + cos * lx - sin * ly)
@@ -78,7 +89,8 @@ private fun DrawScope.drawShape(t: ViewTransform, b: BodyView, x: Double, y: Dou
         is ShapeDef.Circle -> {
             val c = Offset(t.toScreenX(x), t.toScreenY(y))
             val r = t.len(shape.radius).coerceAtLeast(2f)
-            if (shape.sensor) drawCircle(fill, r, c, style = Stroke(width = 2f, pathEffect = sensorDash))
+            if (outlineOnly) drawCircle(fill, r, c, style = Stroke(width = 1.5f))
+            else if (shape.sensor) drawCircle(fill, r, c, style = Stroke(width = 2f, pathEffect = sensorDash))
             else if (b.type == BodyType.Static) drawCircle(fill, r, c, style = Stroke(width = 2f))
             else { drawCircle(fill, r, c); drawCircle(Color.Black.copy(alpha = 0.5f), r, c, style = Stroke(width = 1f)) }
         }
@@ -86,7 +98,16 @@ private fun DrawScope.drawShape(t: ViewTransform, b: BodyView, x: Double, y: Dou
             val h = shape.halfLength
             val p1 = Offset(sx(-h, 0.0), sy(-h, 0.0))
             val p2 = Offset(sx(h, 0.0), sy(h, 0.0))
-            drawLine(fill, p1, p2, strokeWidth = 2 * t.len(shape.radius).coerceAtLeast(2f), cap = StrokeCap.Round)
+            if (outlineOnly) {
+                // Two end circles plus the two side lines.
+                val rr = t.len(shape.radius)
+                drawCircle(fill, rr, p1, style = Stroke(width = 1.5f)); drawCircle(fill, rr, p2, style = Stroke(width = 1.5f))
+                val ox = (-(sin) * shape.radius); val oy = cos * shape.radius
+                drawLine(fill, Offset(sx(-h, 0.0) + t.len(ox), sy(-h, 0.0) - t.len(oy)), Offset(sx(h, 0.0) + t.len(ox), sy(h, 0.0) - t.len(oy)), strokeWidth = 1.5f)
+                drawLine(fill, Offset(sx(-h, 0.0) - t.len(ox), sy(-h, 0.0) + t.len(oy)), Offset(sx(h, 0.0) - t.len(ox), sy(h, 0.0) + t.len(oy)), strokeWidth = 1.5f)
+            } else {
+                drawLine(fill, p1, p2, strokeWidth = 2 * t.len(shape.radius).coerceAtLeast(2f), cap = StrokeCap.Round)
+            }
         }
         is ShapeDef.Polygon -> {
             val path = Path()

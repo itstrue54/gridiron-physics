@@ -103,3 +103,20 @@ class CameraTest {
         assertTrue(s.follow)
     }
 }
+
+class PlayerLookTest {
+    @Test fun playersDrawAsFiguresByDefaultWithCollidersOnDemand() {
+        val s = ViewerState()
+        assertFalse(s.showColliders)
+        s.showColliders = true
+        s.reset()
+        assertTrue(s.showColliders, "the collider toggle is a view preference; reset keeps it")
+    }
+
+    @Test fun onlyPlayersAndOfficialsGetFigures() {
+        assertTrue(isFigure(io.github.itstrue54.gridironphysics.scenarios.Tags.HOME))
+        assertTrue(isFigure(io.github.itstrue54.gridironphysics.scenarios.Tags.AWAY))
+        assertTrue(isFigure(io.github.itstrue54.gridironphysics.scenarios.Tags.OFFICIAL))
+        assertFalse(isFigure(io.github.itstrue54.gridironphysics.scenarios.Tags.PROP))
+    }
+}
