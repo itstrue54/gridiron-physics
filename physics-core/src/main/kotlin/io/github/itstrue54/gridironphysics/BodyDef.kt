@@ -19,6 +19,18 @@ class BodyDef(
     var userData: Int = 0,
     var bullet: Boolean = false,
 ) {
+    /** Copies every field of [other] into this def without allocating. Returns this. */
+    fun copyFrom(other: BodyDef): BodyDef {
+        type = other.type
+        x = other.x; y = other.y; angle = other.angle
+        vx = other.vx; vy = other.vy; angularVelocity = other.angularVelocity
+        mass = other.mass
+        linearDamping = other.linearDamping; angularDamping = other.angularDamping
+        shape = other.shape // ShapeDef is immutable, so sharing it is safe
+        userData = other.userData; bullet = other.bullet
+        return this
+    }
+
     internal fun validate() {
         require(x.isFinite() && y.isFinite() && angle.isFinite()) { "BodyDef position/angle must be finite: ($x, $y, $angle)" }
         require(vx.isFinite() && vy.isFinite() && angularVelocity.isFinite()) { "BodyDef velocity must be finite: ($vx, $vy, $angularVelocity)" }

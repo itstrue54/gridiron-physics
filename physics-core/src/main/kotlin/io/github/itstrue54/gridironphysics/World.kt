@@ -21,19 +21,34 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
     internal val rng = SplitMix64(seed)
     internal val ball = BallState()
 
+    init {
+        require(config.maxBodies <= BodyId.MAX_SLOTS) { "maxBodies must be <= ${BodyId.MAX_SLOTS}" }
+    }
+
+    /** Slot-indexed storage. Iterating slots in order is iterating bodies in ascending id order. */
     private val bodies = arrayOfNulls<Body>(config.maxBodies)
-    private var nextId = 0
+    private val generations = IntArray(config.maxBodies)
+    private var liveCount = 0
+
+    /** One past the highest slot ever used; loops stop here. */
+    private var highWater = 0
     private val view = BodyView()
 
     // ---------------------------------------------------------------- bodies
 
+    /** Creates a body in the lowest free slot. Throws [IllegalStateException] when maxBodies are alive. */
     fun createBody(def: BodyDef): BodyId {
         def.validate()
-        check(nextId < config.maxBodies) { "World is full: ${config.maxBodies} body ids issued (ids are never reused)" }
-        val b = Body(nextId, def.type, def.shape)
+        check(liveCount < config.maxBodies) { "World is full: ${config.maxBodies} live bodies" }
+        var slot = 0
+        while (bodies[slot] != null) slot++
+        val id = BodyId.of(slot, generations[slot])
+        val b = Body(id.value, def.type, def.shape)
         b.x = def.x; b.y = def.y; b.prevX = def.x; b.prevY = def.y
         b.angle = def.angle
-        b.vx = def.vx; b.vy = def.vy; b.angularVelocity = def.angularVelocity
+        if (def.type != BodyType.Static) {
+            b.vx = def.vx; b.vy = def.vy; b.angularVelocity = def.angularVelocity
+        }
         b.linearDamping = def.linearDamping; b.angularDamping = def.angularDamping
         b.userData = def.userData; b.bullet = def.bullet
         val r = b.radius
@@ -43,15 +58,19 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
             b.inertia = 0.5 * def.mass * r * r
             b.invInertia = 1.0 / b.inertia
         }
-        bodies[nextId] = b
-        val id = BodyId(nextId++)
+        bodies[slot] = b
+        liveCount++
+        if (slot >= highWater) highWater = slot + 1
         recorder?.onCreateBody(tick, id, def)
         return id
     }
 
     fun destroyBody(id: BodyId) {
         live(id)
-        bodies[id.value] = null
+        val slot = id.slot
+        bodies[slot] = null
+        generations[slot] = (generations[slot] + 1) and BodyId.GEN_MASK
+        liveCount--
         recorder?.onDestroyBody(tick, id)
     }
 
@@ -61,22 +80,29 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
         return view
     }
 
-    /** Writes live body ids in ascending order into [out]; returns how many. */
+    /** Number of live bodies. */
+    val bodyCount: Int get() = liveCount
+
+    /**
+     * Writes live body ids (as [BodyId.value]) in ascending order into [out] and returns how many were
+     * written. If [out] is shorter than [bodyCount], only the first `out.size` ids are written.
+     */
     fun bodyIds(out: IntArray): Int {
         var n = 0
-        for (i in 0 until nextId) {
-            if (bodies[i] != null) {
-                if (n < out.size) out[n] = i
-                n++
-            }
+        for (i in 0 until highWater) {
+            if (n == out.size) break
+            val b = bodies[i] ?: continue
+            out[n++] = b.id
         }
-        return minOf(n, out.size)
+        return n
     }
 
     private fun live(id: BodyId): Body {
-        val i = id.value
-        require(i in 0 until nextId) { "Unknown body id $i" }
-        return bodies[i] ?: throw IllegalArgumentException("Body $i was destroyed")
+        val slot = id.slot
+        require(id.value >= 0 && slot < highWater) { "Unknown body id ${id.value}" }
+        val b = bodies[slot]
+        require(b != null && b.id == id.value) { "Body ${id.value} was destroyed" }
+        return b
     }
 
     // ---------------------------------------------------------------- frame accumulator
@@ -131,7 +157,7 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
 
     private fun integrateVelocities() {
         val dt = WorldConfig.DT
-        for (i in 0 until nextId) {
+        for (i in 0 until highWater) {
             val b = bodies[i] ?: continue
             if (b.type != BodyType.Dynamic) continue
             // Forces arrive in M3. Damping uses the Box2D form, stable for any damping value.
@@ -155,7 +181,7 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
 
     private fun integratePositions() {
         val dt = WorldConfig.DT
-        for (i in 0 until nextId) {
+        for (i in 0 until highWater) {
             val b = bodies[i] ?: continue
             b.prevX = b.x
             b.prevY = b.y
@@ -196,9 +222,9 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
      */
     fun stateHash(): Long {
         var h = Fnv1a64.OFFSET
-        for (i in 0 until nextId) {
+        for (i in 0 until highWater) {
             val b = bodies[i] ?: continue
-            h = Fnv1a64.mixLong(h, i.toLong())
+            h = Fnv1a64.mixLong(h, b.id.toLong())
             h = Fnv1a64.mixDouble(h, b.x)
             h = Fnv1a64.mixDouble(h, b.y)
             h = Fnv1a64.mixDouble(h, b.angle)

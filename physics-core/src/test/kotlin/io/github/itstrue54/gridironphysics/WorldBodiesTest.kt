@@ -84,8 +84,54 @@ class WorldBodiesTest {
         val c = w.createBody(BodyDef())
         val out = IntArray(8)
         assertEquals(2, w.bodyIds(out))
-        assertEquals(listOf(b.value, c.value), out.take(2))
-        assertTrue(c.value > b.value)
+        assertTrue(out[0] < out[1], "ascending")
+        assertEquals(setOf(b.value, c.value), out.take(2).toSet())
+        assertTrue(c.value != a.value, "a destroyed id is never handed out again")
+    }
+
+    // Final review #1: capacity counts live bodies, so one World can last a whole game.
+    @Test fun capacityCountsLiveBodiesNotLifetimeCreations() {
+        val w = World(WorldConfig(maxBodies = 4), FieldConfig.PRO, 1L)
+        val seen = HashSet<Int>()
+        repeat(10_000) {
+            val id = w.createBody(BodyDef())
+            assertTrue(seen.add(id.value), "id ${id.value} reused")
+            w.step()
+            w.destroyBody(id)
+        }
+        repeat(4) { w.createBody(BodyDef()) }
+        assertFailsWith<IllegalStateException> { w.createBody(BodyDef()) }
+    }
+
+    @Test fun staleIdOfReusedSlotIsRejected() {
+        val w = World(WorldConfig(maxBodies = 1), FieldConfig.PRO, 1L)
+        val a = w.createBody(BodyDef(x = 1.0))
+        w.destroyBody(a)
+        val b = w.createBody(BodyDef(x = 2.0))
+        assertFailsWith<IllegalArgumentException> { w.body(a) }
+        assertFailsWith<IllegalArgumentException> { w.destroyBody(a) }
+        assertEquals(2.0, w.body(b).x)
+    }
+
+    // Final review #3: static bodies have no velocity (the M2 solver reads it).
+    @Test fun staticBodyVelocityIsZeroed() {
+        val w = world()
+        val s = w.body(w.createBody(BodyDef(type = BodyType.Static, vx = 3.0, vy = -1.0, angularVelocity = 2.0)))
+        assertEquals(0.0, s.vx); assertEquals(0.0, s.vy); assertEquals(0.0, s.angularVelocity)
+    }
+
+    // Final review #2: a recorder must be able to keep a copy that later reuse of the def does not change.
+    @Test fun bodyDefCopyFromCopiesEveryField() {
+        val src = BodyDef(
+            type = BodyType.Kinematic, x = 1.0, y = 2.0, angle = 3.0, vx = 4.0, vy = 5.0, angularVelocity = 6.0,
+            mass = 7.0, linearDamping = 8.0, angularDamping = 9.0, shape = ShapeDef.Circle(0.31), userData = 10, bullet = true,
+        )
+        val dst = BodyDef().copyFrom(src)
+        src.x = -1.0; src.userData = -1; src.type = BodyType.Static
+        assertEquals(BodyType.Kinematic, dst.type)
+        assertEquals(listOf(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0), listOf(dst.x, dst.y, dst.angle, dst.vx, dst.vy, dst.angularVelocity, dst.mass, dst.linearDamping, dst.angularDamping))
+        assertEquals(0.31, (dst.shape as ShapeDef.Circle).radius)
+        assertEquals(10, dst.userData); assertTrue(dst.bullet)
     }
 
     @Test fun recorderSeesCreateAndDestroy() {
@@ -122,7 +168,8 @@ class WorldBodiesTest {
         w.createBody(BodyDef())
         assertFailsWith<IllegalStateException> { w.createBody(BodyDef()) }
         w.destroyBody(a)
-        assertFailsWith<IllegalStateException> { w.createBody(BodyDef()) } // ids are never reused
+        w.createBody(BodyDef()) // a live slot is free again
+        assertFailsWith<IllegalStateException> { w.createBody(BodyDef()) }
         assertFailsWith<IllegalArgumentException> { w.destroyBody(a) }
         assertFailsWith<IllegalArgumentException> { w.body(a) }
         assertFailsWith<IllegalArgumentException> { w.destroyBody(BodyId(99)) }

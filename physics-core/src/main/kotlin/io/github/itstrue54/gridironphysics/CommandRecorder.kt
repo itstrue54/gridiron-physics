@@ -5,6 +5,10 @@ package io.github.itstrue54.gridironphysics
  * Replays (M7) are built from this log, so every new public mutator must add a method here.
  */
 interface CommandRecorder {
+    /**
+     * [def] is the caller's object and is only valid during this call: games reuse one BodyDef for many
+     * bodies. To keep it, copy it with [BodyDef.copyFrom] into a def the recorder owns.
+     */
     fun onCreateBody(tick: Long, id: BodyId, def: BodyDef)
     fun onDestroyBody(tick: Long, id: BodyId)
 }
