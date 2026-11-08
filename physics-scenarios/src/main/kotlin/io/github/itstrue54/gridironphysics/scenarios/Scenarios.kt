@@ -1,7 +1,9 @@
 package io.github.itstrue54.gridironphysics.scenarios
 
 import io.github.itstrue54.gridironphysics.AthleteParams
+import io.github.itstrue54.gridironphysics.BlockDef
 import io.github.itstrue54.gridironphysics.BodyDef
+import io.github.itstrue54.gridironphysics.GrappleDef
 import io.github.itstrue54.gridironphysics.LocomotionIntent
 import io.github.itstrue54.gridironphysics.BodyType
 import io.github.itstrue54.gridironphysics.Category
@@ -12,6 +14,69 @@ import io.github.itstrue54.gridironphysics.math.DMath
 
 /** Every scenario, in the order the viewer lists them. Later milestones add the spec's other setups. */
 object Scenarios {
+
+    /**
+     * M5: two wrap-ups at once. A 95 kg carrier at 8 m/s keeps driving downfield with two tacklers wrapped on him
+     * (one from behind on each side, carried along almost at his speed); their drag stacks and brings him to a stop within a few yards, and the
+     * forward-progress line marks his best spot. Below them a slower carrier pulls away from a weak arm tackle,
+     * which strains (the rope turns red) and breaks (GrappleBroken).
+     */
+    val tackleWithGrapple = scenario(
+        name = "Tackle with grapple",
+        description = "Two tacklers' drag stacks and stops a driving carrier; a weak arm tackle strains and breaks (M5)",
+        seed = 19L,
+    ) {
+        val runner = AthleteParams(maxSpeed = 9.0, maxAccel = 7.0, maxDecel = 8.0, turnRateAtRest = 12.0, turnRateAtMax = 2.5)
+        val mid = field.midfieldX
+        val cy = field.widthM / 2
+        world.setAttackDirection(1)
+        val carrier = athlete(mid - 8.0, cy, 95.0, 0.32, Tags.HOME, runner, LocomotionIntent.velocity(8.5, 0.0), vx = 8.0)
+        world.setBallCarrier(carrier)
+        val t1 = player(mid - 8.45, cy + 0.5, vx = 7.5, mass = 110.0, radius = 0.34, damping = 1.5, tag = Tags.AWAY)
+        val t2 = player(mid - 8.3, cy - 0.62, vx = 7.2, mass = 105.0, radius = 0.34, damping = 1.5, tag = Tags.AWAY)
+        world.createGrapple(t1, carrier, GrappleDef(breakForce = 3000.0, dragForce = 700.0))
+        world.createGrapple(t2, carrier, GrappleDef(breakForce = 3000.0, dragForce = 700.0))
+        // The arm tackle: a tackler with his heels dug in (heavy damping) behind a carrier who turns on the burners.
+        // The faster they go, the harder the tackler's feet drag, so the pull ramps up until the grip goes.
+        val c2 = athlete(mid - 8.0, cy - 7.0, 90.0, 0.32, Tags.HOME, runner, LocomotionIntent.velocity(9.0, 0.0), vx = 0.5)
+        val arm = player(mid - 8.68, cy - 7.0, vx = 0.5, mass = 100.0, radius = 0.34, damping = 2.5, tag = Tags.AWAY)
+        world.createGrapple(arm, c2, GrappleDef(breakForce = 470.0))
+    }
+
+    /**
+     * M5: the spec's double-team block on a 150 kg lineman. Two blockers angled in at ±30° push 1500 N each; the
+     * lineman pushes back with 2400 N split across the two blocks, so leverage and numbers drive him back until
+     * the push fades with speed. Below them a one-on-one defender rips sideways and sheds his block (BlockShed).
+     */
+    val doubleTeam = scenario(
+        name = "Double-team block on a 150 kg lineman",
+        description = "Two angled blockers drive a 150 kg lineman back; a one-on-one defender rips sideways and sheds (M5)",
+        seed = 23L,
+    ) {
+        val mid = field.midfieldX
+        val cy = field.widthM / 2
+        val gap = 0.72 // engaged distance between centers
+        val a = DMath.PI / 6
+        val ca = DMath.cos(a); val sa = DMath.sin(a)
+        fun lineman(x: Double, y: Double, angle: Double, mass: Double, tag: Int) = body(
+            BodyDef(
+                x = x, y = y, angle = angle, mass = mass, linearDamping = 0.3, angularDamping = SPIN_DAMPING,
+                shape = ShapeDef.Circle(0.36), userData = tag, categoryBits = if (tag == Tags.AWAY) Category.AWAY else Category.HOME,
+            ),
+        )
+        val nose = lineman(mid + 0.5, cy, DMath.PI, 150.0, Tags.AWAY)
+        val left = lineman(mid + 0.5 - gap * ca, cy - gap * sa, a, 140.0, Tags.HOME)
+        val right = lineman(mid + 0.5 - gap * ca, cy + gap * sa, -a, 135.0, Tags.HOME)
+        for (b in listOf(left, right)) {
+            world.createBlock(b, nose, BlockDef(blockerPushForce = 1500.0, defenderPushForce = 1200.0, shedThreshold = 900.0, driveSpeed = 2.0))
+        }
+        // One-on-one: the defender rips toward the near sideline and sheds.
+        val blocker = lineman(mid + 0.5 - gap, cy - 6.0, 0.0, 130.0, Tags.HOME)
+        val rusher = lineman(mid + 0.5, cy - 6.0, DMath.PI, 125.0, Tags.AWAY) // facing his blocker
+        world.setAthlete(rusher, AthleteParams(maxSpeed = 7.0, maxAccel = 7.0, maxDecel = 8.0, turnRateAtRest = 8.0, turnRateAtMax = 2.5))
+        world.setIntent(rusher, LocomotionIntent.point(mid + 0.5, cy - 10.0))
+        world.createBlock(blocker, rusher, BlockDef(blockerPushForce = 1300.0, defenderPushForce = 1300.0, shedThreshold = 400.0))
+    }
 
     /**
      * M4: one of each event near the away end zone. Two players collide (Hit), a runner trips over a Down player
@@ -194,7 +259,7 @@ object Scenarios {
         prop(x = field.homeGoalLineX, y = field.widthM / 2, radius = 0.5)
     }
 
-    val all: List<Scenario> = listOf(headOnTackle, sidelineRun, eventLab, contactLab, drift)
+    val all: List<Scenario> = listOf(tackleWithGrapple, doubleTeam, headOnTackle, sidelineRun, eventLab, contactLab, drift)
 
     /** Angular damping for coasting bodies (no locomotion holds their heading). */
     private const val SPIN_DAMPING = 8.0

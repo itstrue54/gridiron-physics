@@ -17,4 +17,15 @@ interface CommandRecorder {
     fun onSetIntent(tick: Long, id: BodyId, intent: LocomotionIntent)
     fun onSetStance(tick: Long, id: BodyId, stance: Stance)
     fun onSetSurface(tick: Long, surface: SurfaceConfig)
+
+    // Joint defs are immutable, so a recorder may keep them.
+    fun onCreateGrapple(tick: Long, id: JointId, tackler: BodyId, carrier: BodyId, def: GrappleDef)
+    fun onCreateBlock(tick: Long, id: JointId, blocker: BodyId, defender: BodyId, def: BlockDef)
+    fun onCreateDistance(tick: Long, id: JointId, a: BodyId, b: BodyId, def: DistanceDef)
+    fun onCreateWeld(tick: Long, id: JointId, a: BodyId, b: BodyId, def: WeldDef)
+
+    /** Only calls to [World.destroyJoint]; joints that break, or go with a destroyed body, are not commands. */
+    fun onDestroyJoint(tick: Long, id: JointId)
+    fun onSetBallCarrier(tick: Long, id: BodyId?)
+    fun onSetAttackDirection(tick: Long, direction: Int)
 }

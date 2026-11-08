@@ -41,6 +41,7 @@ class ViewerState(scenario: Scenario = Scenarios.all.first()) {
         private set
 
     private val idBuf = IntArray(256)
+    private val jointBuf = IntArray(256)
 
     /** Recent events to draw, oldest first. Contact begin/end and sensor ends are logged but not drawn. */
     val markers: List<EventMarker> get() = markerList
@@ -163,6 +164,9 @@ class ViewerState(scenario: Scenario = Scenarios.all.first()) {
                 EventType.OutOfBounds -> "OUT (" + lineName(r.line) + ")"
                 EventType.SensorBegin -> lineName(r.line)
                 EventType.SensorEnd -> { mark = false; "left " + lineName(r.line) }
+                EventType.GrappleBroken -> "GRAPPLE BROKEN %.0f N".format(r.force)
+                EventType.BlockShed -> "BLOCK SHED %.0f N".format(r.force)
+                EventType.Down -> if (r.ballCarrier) "DOWN, spot x = %.2f m".format(r.forwardProgressX) else "down"
                 EventType.ContactBegin, EventType.ContactEnd -> {
                     mark = false
                     val other = if (r.wall != ContactView.NO_WALL) "wall " + r.wall else "#" + r.bodyB.value
@@ -173,9 +177,15 @@ class ViewerState(scenario: Scenario = Scenarios.all.first()) {
             if (!slipGoesOn) logList.add(0, "" + r.tick + "  #" + r.bodyA.value + "  " + text)
             if (logList.size > LOG_SIZE) logList.removeAt(logList.size - 1)
             if (!mark) continue
-            if (type == EventType.Slip || type == EventType.OutOfBounds || type == EventType.SensorBegin) {
+            if (type == EventType.Slip || type == EventType.OutOfBounds || type == EventType.SensorBegin || type == EventType.Down) {
                 val b = world.body(r.bodyA)
                 x = b.x; y = b.y
+            }
+            if (type == EventType.GrappleBroken || type == EventType.BlockShed) {
+                // Where the joint was: midway between its bodies.
+                val ax = world.body(r.bodyA).x; val ay = world.body(r.bodyA).y
+                val b = world.body(r.bodyB)
+                x = (ax + b.x) / 2; y = (ay + b.y) / 2
             }
             if (type == EventType.Hit) {
                 // A pair that bounces and re-engages hits again on the same spot: draw the ring, keep the first label.
@@ -189,6 +199,10 @@ class ViewerState(scenario: Scenario = Scenarios.all.first()) {
         val now = world.tick
         markerList.removeAll { now - it.tick >= MARKER_TICKS }
     }
+
+    /** Live joint ids, ascending. The returned array is reused; read only the first [jointCount] entries. */
+    fun jointIds(): IntArray = jointBuf
+    val jointCount: Int get() = world.jointIds(jointBuf)
 
     /** Live body ids, ascending. The returned array is reused; read only the first [count] entries. */
     fun ids(): IntArray = idBuf
