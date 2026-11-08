@@ -2,6 +2,7 @@ package io.github.itstrue54.gridironphysics.debug
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -34,7 +35,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.rememberTextMeasurer
@@ -57,6 +62,7 @@ fun main() = application {
     }
 }
 
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun ViewerApp() {
     val state = remember { ViewerState() }
@@ -80,17 +86,34 @@ fun ViewerApp() {
         TopBar(state, frameNo) { frameNo++ }
         Row(Modifier.fillMaxSize()) {
             Canvas(
-                Modifier.weight(1f).fillMaxHeight().background(Color(0xFF102915)).pointerInput(Unit) {
-                    detectTapGestures { p ->
-                        val t = transform ?: return@detectTapGestures
-                        state.selected = state.pick(t.toWorldX(p.x), t.toWorldY(p.y))
-                        frameNo++
+                Modifier.weight(1f).fillMaxHeight().clipToBounds().background(Color(0xFF102915))
+                    .pointerInput(Unit) {
+                        detectTapGestures { p ->
+                            val t = transform ?: return@detectTapGestures
+                            state.selected = state.pick(t.toWorldX(p.x), t.toWorldY(p.y))
+                            frameNo++
+                        }
                     }
-                },
+                    .pointerInput(Unit) {
+                        // Drag to pan: the world moves with the pointer.
+                        detectDragGestures { _, d ->
+                            val t = transform ?: return@detectDragGestures
+                            state.panBy(-d.x / t.pxPerMeter.toDouble(), d.y / t.pxPerMeter.toDouble())
+                            frameNo++
+                        }
+                    }
+                    .onPointerEvent(PointerEventType.Scroll) { e ->
+                        // Wheel up zooms in about the cursor.
+                        val t = transform ?: return@onPointerEvent
+                        val ch = e.changes.first()
+                        val factor = if (ch.scrollDelta.y < 0f) 1.25 else 1.0 / 1.25
+                        state.zoomBy(factor, t.toWorldX(ch.position.x), t.toWorldY(ch.position.y))
+                        frameNo++
+                    },
             ) {
                 @Suppress("UNUSED_EXPRESSION") frameNo
-                val t = ViewTransform(state.world.field, size.width, size.height)
-                if (transform?.canvasW != size.width || transform?.canvasH != size.height) transform = t
+                val t = ViewTransform(state.world.field, size.width, size.height, view = state.viewRect())
+                transform = t
                 drawField(t, textMeasurer)
                 drawRunoffWalls(t, state.world.config.runoffWalls)
                 drawBodies(t, state)
@@ -127,10 +150,12 @@ private fun TopBar(state: ViewerState, frameNo: Long, changed: () -> Unit) {
             }
         }
         OutlinedButton(onClick = { state.reset(); changed() }) { Text("Reset") }
+        FilterChip(selected = state.follow, onClick = { state.follow = !state.follow; changed() }, label = { Text("Follow") })
+        OutlinedButton(onClick = { state.showFullField(); changed() }) { Text("Full field") }
         Spacer(Modifier.width(16.dp))
         Text("tick ${state.world.tick}   t = ${"%.2f".format(state.world.tick / 60.0)} s   (frame $frameNo)", fontFamily = FontFamily.Monospace)
         Spacer(Modifier.weight(1f))
-        Text(state.scenario.description, fontSize = 12.sp)
+        Text(state.scenario.description + "   (wheel: zoom, drag: pan)", fontSize = 12.sp)
     }
 }
 
