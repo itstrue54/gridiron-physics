@@ -21,8 +21,17 @@ object Scenarios {
     ) {
         val mid = field.midfieldX
         val cy = field.widthM / 2
-        player(x = mid - 5.0, y = cy, vx = 9.0, mass = 90.0, radius = 0.32, tag = Tags.HOME)
-        player(x = mid + 5.0, y = cy + 0.15, vx = -7.0, mass = 115.0, radius = 0.36, tag = Tags.AWAY)
+        // No locomotion until M3, so the players coast: start close and with light damping so they still
+        // meet at full speed. Strong angular damping stands in for a player holding his heading.
+        fun runner(x: Double, y: Double, vx: Double, mass: Double, r: Double, tag: Int) = body(
+            BodyDef(
+                x = x, y = y, vx = vx, mass = mass, linearDamping = 0.25, angularDamping = SPIN_DAMPING,
+                angle = if (tag == Tags.AWAY) DMath.PI else 0.0, shape = ShapeDef.Circle(r), userData = tag,
+                categoryBits = if (tag == Tags.AWAY) Category.AWAY else Category.HOME,
+            ),
+        )
+        runner(mid - 1.6, cy, 9.0, 90.0, 0.32, Tags.HOME)
+        runner(mid + 1.6, cy + 0.15, -7.0, 115.0, 0.36, Tags.AWAY)
     }
 
     /**
@@ -36,10 +45,11 @@ object Scenarios {
         description = "Walls, sled, capsules, post base, line sensor; everything settles and sleeps (M2)",
         seed = 5L,
     ) {
-        val d = 1.5 // damping
+        val d = 1.0 // linear damping: everyone coasts to rest within a few seconds
+        val spin = SPIN_DAMPING
         fun runner(x: Double, y: Double, vx: Double, vy: Double, tag: Int = Tags.HOME) = body(
             BodyDef(
-                x = x, y = y, vx = vx, vy = vy, mass = 95.0, linearDamping = d, angularDamping = d,
+                x = x, y = y, vx = vx, vy = vy, mass = 95.0, linearDamping = d, angularDamping = spin,
                 angle = DMath.atan2(vy, vx), shape = ShapeDef.Circle(0.33), userData = tag,
                 categoryBits = if (tag == Tags.AWAY) Category.AWAY else Category.HOME,
             ),
@@ -50,7 +60,7 @@ object Scenarios {
         runner(40.0, 20.0, 7.0, 0.0)
         body(
             BodyDef(
-                x = 43.0, y = 20.0, mass = 200.0, linearDamping = 2.0, angularDamping = 2.0,
+                x = 43.0, y = 20.0, mass = 200.0, linearDamping = 2.0, angularDamping = spin,
                 shape = ShapeDef.box(0.5, 1.0), userData = Tags.PROP, categoryBits = Category.STATIC,
                 material = Material.STRUCTURE,
             ),
@@ -58,13 +68,13 @@ object Scenarios {
         // A diver slides into a downed player.
         body(
             BodyDef(
-                x = 50.0, y = 22.0, vx = 6.0, mass = 100.0, linearDamping = d, angularDamping = d,
+                x = 50.0, y = 22.0, vx = 6.0, mass = 100.0, linearDamping = d, angularDamping = spin,
                 shape = ShapeDef.Capsule(0.6, 0.3), userData = Tags.HOME, categoryBits = Category.HOME,
             ),
         )
         body(
             BodyDef(
-                x = 53.0, y = 22.3, angle = DMath.PI / 2, mass = 110.0, linearDamping = d, angularDamping = d,
+                x = 53.0, y = 22.3, angle = DMath.PI / 2, mass = 110.0, linearDamping = d, angularDamping = spin,
                 shape = ShapeDef.Capsule(0.6, 0.32), userData = Tags.AWAY, categoryBits = Category.AWAY,
                 material = Material.DOWNED_PLAYER,
             ),
@@ -77,10 +87,10 @@ object Scenarios {
                 userData = Tags.PROP, categoryBits = Category.STATIC, material = Material.STRUCTURE,
             ),
         )
-        runner(56.0, 25.0, 5.0, 2.4)
+        runner(57.5, 25.8, 5.0, 2.4)
         // Two players colliding at an angle.
         runner(35.0, 32.0, 6.0, 2.0, Tags.HOME)
-        runner(40.0, 36.0, -4.0, -3.0, Tags.AWAY)
+        runner(40.0, 34.5, -4.0, -3.0, Tags.AWAY) // paths cross at (38, 33)
         // A runner crossing a line sensor: reported, never stopped.
         body(
             BodyDef(
@@ -129,4 +139,7 @@ object Scenarios {
     }
 
     val all: List<Scenario> = listOf(headOnTackle, contactLab, drift)
+
+    /** Angular damping for coasting players (M2 has no locomotion to hold a heading). */
+    private const val SPIN_DAMPING = 8.0
 }

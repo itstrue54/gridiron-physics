@@ -89,7 +89,68 @@ class ScenariosTest {
         assertEquals(pBefore, pAfter, kotlin.math.abs(pBefore) * 0.02 + 5.0)
     }
 
+    @Test fun headOnTackleHitsAtNearlyFullSpeed() {
+        val w = Scenarios.headOnTackle.build()
+        val ids = ids(w)
+        val back = ids.single { w.body(it).userData == Tags.HOME }
+        val lb = ids.single { w.body(it).userData == Tags.AWAY }
+        var vBack = 0.0; var vLb = 0.0
+        var hit = false
+        repeat(120) {
+            if (!hit) { vBack = w.body(back).vx; vLb = w.body(lb).vx }
+            w.step()
+            for (i in 0 until w.contactCount) if (w.contact(i).normalImpulse(0) > 0.0) hit = true
+        }
+        assertTrue(hit)
+        assertTrue(vBack >= 0.95 * 9.0, "back should arrive near 9 m/s, was $vBack")
+        assertTrue(vLb <= -0.95 * 7.0, "linebacker should arrive near 7 m/s, was $vLb")
+    }
+
+    @Test fun playersStopSpinningSoonAfterAHit() {
+        for (sc in listOf(Scenarios.headOnTackle, Scenarios.contactLab)) {
+            val w = sc.build()
+            val ids = ids(w)
+            // Each body is checked 0.5 s after the last tick it took an impulse.
+            val lastHit = HashMap<Int, Int>()
+            var checks = 0
+            for (t in 0 until 400) {
+                w.step()
+                for (i in 0 until w.contactCount) {
+                    val c = w.contact(i)
+                    if (c.sensor || c.pointCount == 0 || c.normalImpulse(0) <= 0.0) continue
+                    lastHit[c.bodyA.value] = t
+                    if (c.wall == io.github.itstrue54.gridironphysics.ContactView.NO_WALL) lastHit[c.bodyB.value] = t
+                }
+                ids.filter { w.body(it).type == BodyType.Dynamic && lastHit[it.value] == t - 30 }.forEach {
+                    checks++
+                    val spin = kotlin.math.abs(w.body(it).angularVelocity)
+                    assertTrue(spin < 0.3, "${sc.name}: body ${it.value} still spinning at $spin rad/s, 0.5 s after its last hit")
+                }
+            }
+            assertTrue(checks > 0, "${sc.name} must have a hit")
+        }
+    }
+
     // ------------------------------------------------------------ M2: contact lab (shapes, walls, sleeping)
+
+    @Test fun contactLabEveryInteractionActuallyHappens() {
+        val w = Scenarios.contactLab.build()
+        val ids = ids(w)
+        val touched = HashSet<Pair<Int, Int>>()
+        val walls = HashSet<Int>()
+        repeat(300) {
+            w.step()
+            for (i in 0 until w.contactCount) {
+                val c = w.contact(i)
+                if (!c.touching && c.normalImpulse(0) == 0.0) continue
+                if (c.wall != io.github.itstrue54.gridironphysics.ContactView.NO_WALL) walls += c.bodyA.value
+                else touched += c.bodyA.value to c.bodyB.value
+            }
+        }
+        assertEquals(1, walls.size, "one runner hits the runoff wall")
+        // Pairs that must touch: runner–sled, diver–downed player, runner–post base, the two angled players, runner–line sensor.
+        assertTrue(touched.size >= 5, "expected at least 5 touching pairs, got ${touched.size}: $touched")
+    }
 
     @Test fun contactLabUsesEveryShapeKind() {
         val w = Scenarios.contactLab.build()
