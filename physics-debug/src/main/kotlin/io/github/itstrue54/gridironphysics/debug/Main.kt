@@ -46,26 +46,29 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Window
+import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import io.github.itstrue54.gridironphysics.scenarios.Scenario
 import io.github.itstrue54.gridironphysics.scenarios.Scenarios
 
 fun main() = application {
+    var onTop by remember { mutableStateOf(true) }
     Window(
         onCloseRequest = ::exitApplication,
         title = "gridiron-physics viewer",
-        state = rememberWindowState(width = 1500.dp, height = 860.dp),
+        state = rememberWindowState(width = 1500.dp, height = 860.dp, position = WindowPosition(Alignment.Center)),
+        alwaysOnTop = onTop,
     ) {
         MaterialTheme(colorScheme = darkColorScheme()) {
-            Surface(Modifier.fillMaxSize()) { ViewerApp() }
+            Surface(Modifier.fillMaxSize()) { ViewerApp(onTopChanged = { onTop = it }) }
         }
     }
 }
 
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
-fun ViewerApp(initial: Scenario = Scenarios.all.first(), showColliders: Boolean = false) {
+fun ViewerApp(initial: Scenario = Scenarios.all.first(), showColliders: Boolean = false, onTopChanged: (Boolean) -> Unit = {}) {
     val state = remember { ViewerState(initial).also { it.showColliders = showColliders } }
     // Bumped every frame and on every control action; reading it makes the canvas and panel redraw.
     var frameNo by remember { mutableLongStateOf(0L) }
@@ -84,7 +87,7 @@ fun ViewerApp(initial: Scenario = Scenarios.all.first(), showColliders: Boolean 
     }
 
     Column(Modifier.fillMaxSize()) {
-        TopBar(state, frameNo) { frameNo++ }
+        TopBar(state, frameNo, onTopChanged) { frameNo++ }
         Row(Modifier.fillMaxSize()) {
             Canvas(
                 Modifier.weight(1f).fillMaxHeight().clipToBounds().background(Color(0xFF102915))
@@ -126,7 +129,7 @@ fun ViewerApp(initial: Scenario = Scenarios.all.first(), showColliders: Boolean 
 }
 
 @Composable
-private fun TopBar(state: ViewerState, frameNo: Long, changed: () -> Unit) {
+private fun TopBar(state: ViewerState, frameNo: Long, onTopChanged: (Boolean) -> Unit, changed: () -> Unit) {
     var menuOpen by remember { mutableStateOf(false) }
     Row(
         Modifier.fillMaxWidth().padding(8.dp),
@@ -154,6 +157,11 @@ private fun TopBar(state: ViewerState, frameNo: Long, changed: () -> Unit) {
         FilterChip(selected = state.follow, onClick = { state.follow = !state.follow; changed() }, label = { Text("Follow") })
         OutlinedButton(onClick = { state.showFullField(); changed() }) { Text("Full field") }
         FilterChip(selected = state.showColliders, onClick = { state.showColliders = !state.showColliders; changed() }, label = { Text("Colliders") })
+        FilterChip(
+            selected = state.alwaysOnTop,
+            onClick = { state.alwaysOnTop = !state.alwaysOnTop; onTopChanged(state.alwaysOnTop); changed() },
+            label = { Text("On top") },
+        )
         Spacer(Modifier.width(16.dp))
         Text("tick ${state.world.tick}   t = ${"%.2f".format(state.world.tick / 60.0)} s   (frame $frameNo)", fontFamily = FontFamily.Monospace)
         Spacer(Modifier.weight(1f))

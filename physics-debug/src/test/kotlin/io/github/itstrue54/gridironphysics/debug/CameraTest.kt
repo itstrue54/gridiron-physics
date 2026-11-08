@@ -120,3 +120,13 @@ class PlayerLookTest {
         assertFalse(isFigure(io.github.itstrue54.gridironphysics.scenarios.Tags.PROP))
     }
 }
+
+class WindowTest {
+    @Test fun viewerStaysOnTopByDefaultAndCanBeUnpinned() {
+        val s = ViewerState()
+        assertTrue(s.alwaysOnTop, "a Gradle-launched window can't take focus on Windows, so it pins itself on top")
+        s.alwaysOnTop = false
+        s.reset()
+        assertFalse(s.alwaysOnTop, "a window preference; reset keeps it")
+    }
+}

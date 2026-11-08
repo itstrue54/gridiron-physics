@@ -24,6 +24,12 @@ class ViewerState(scenario: Scenario = Scenarios.all.first()) {
     /** Draw the raw physics shapes over the player figures. A view preference: [reset] keeps it. */
     var showColliders: Boolean = false
 
+    /**
+     * Keep the window above other windows. On by default: Windows won't let a window launched from Gradle take
+     * focus, so without this it opens and immediately drops behind whatever was in front. [reset] keeps it.
+     */
+    var alwaysOnTop: Boolean = true
+
     /** Interpolation fraction between the previous and current tick, for drawing. */
     var alpha: Double = 0.0
         private set
