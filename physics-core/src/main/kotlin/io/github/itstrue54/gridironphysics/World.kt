@@ -78,6 +78,36 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
         return bodies[i] ?: throw IllegalArgumentException("Body $i was destroyed")
     }
 
+    // ---------------------------------------------------------------- frame accumulator
+
+    private var accumulator = 0.0
+
+    /** Leftover fraction of a tick after the last [advance], in [0, 1). Use it to interpolate drawing. */
+    var alpha: Double = 0.0
+        private set
+
+    /**
+     * Feeds one rendered frame's real time. Runs 0 to [WorldConfig.maxTicksPerFrame] ticks, drops any
+     * time beyond that (so a long pause never causes a burst of catch-up ticks), and returns [alpha].
+     * Frame timing is not part of the deterministic simulation; replays record ticks, not frame times.
+     */
+    fun advance(frameSeconds: Double): Double {
+        require(frameSeconds.isFinite()) { "frameSeconds must be finite: $frameSeconds" }
+        val dt = WorldConfig.DT
+        if (frameSeconds > 0.0) accumulator += frameSeconds
+        var ticks = 0
+        while (ticks < config.maxTicksPerFrame && accumulator >= dt - ADVANCE_EPS) {
+            step()
+            accumulator -= dt
+            ticks++
+        }
+        // Keep the leftover strictly below one tick's threshold so dropped time never resurfaces.
+        val maxLeft = dt - 2 * ADVANCE_EPS
+        accumulator = if (accumulator < 0.0) 0.0 else if (accumulator > maxLeft) maxLeft else accumulator
+        alpha = accumulator / dt
+        return alpha
+    }
+
     // ---------------------------------------------------------------- step
 
     /** Advances exactly one 1/60 s tick, running the spec's ten phases in order. */
@@ -150,5 +180,10 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
     private fun bookkeeping() {
         // M2: sleep states. M1: tick counter (+ optional hash, Task 6).
         tick++
+    }
+
+    private companion object {
+        /** 1 ns of slack so frame times that sum to whole ticks are not lost to rounding. */
+        const val ADVANCE_EPS = 1e-9
     }
 }
