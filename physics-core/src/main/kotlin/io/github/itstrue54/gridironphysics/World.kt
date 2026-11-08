@@ -2,6 +2,7 @@ package io.github.itstrue54.gridironphysics
 
 import io.github.itstrue54.gridironphysics.internal.BallState
 import io.github.itstrue54.gridironphysics.internal.Body
+import io.github.itstrue54.gridironphysics.math.Fnv1a64
 import io.github.itstrue54.gridironphysics.math.SplitMix64
 
 /**
@@ -178,8 +179,42 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
     }
 
     private fun bookkeeping() {
-        // M2: sleep states. M1: tick counter (+ optional hash, Task 6).
+        // M2: sleep states.
         tick++
+        if (config.hashEveryTick) lastTickHash = stateHash()
+    }
+
+    // ---------------------------------------------------------------- determinism
+
+    /** The hash computed at the end of the last tick, when [WorldConfig.hashEveryTick] is on. */
+    var lastTickHash: Long = 0L
+        private set
+
+    /**
+     * FNV-1a over the raw bits of every live body's id, position, angle and velocities (ascending id),
+     * then the ball state, then the tick count. Equal hashes on two devices mean equal simulations.
+     */
+    fun stateHash(): Long {
+        var h = Fnv1a64.OFFSET
+        for (i in 0 until nextId) {
+            val b = bodies[i] ?: continue
+            h = Fnv1a64.mixLong(h, i.toLong())
+            h = Fnv1a64.mixDouble(h, b.x)
+            h = Fnv1a64.mixDouble(h, b.y)
+            h = Fnv1a64.mixDouble(h, b.angle)
+            h = Fnv1a64.mixDouble(h, b.vx)
+            h = Fnv1a64.mixDouble(h, b.vy)
+            h = Fnv1a64.mixDouble(h, b.angularVelocity)
+        }
+        h = Fnv1a64.mixDouble(h, ball.x)
+        h = Fnv1a64.mixDouble(h, ball.y)
+        h = Fnv1a64.mixDouble(h, ball.z)
+        h = Fnv1a64.mixDouble(h, ball.vx)
+        h = Fnv1a64.mixDouble(h, ball.vy)
+        h = Fnv1a64.mixDouble(h, ball.vz)
+        h = Fnv1a64.mixLong(h, ball.mode.toLong())
+        h = Fnv1a64.mixLong(h, tick)
+        return h
     }
 
     private companion object {
