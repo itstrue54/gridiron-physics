@@ -27,9 +27,13 @@ class BodyView internal constructor() {
     val inertia: Double get() = body.inertia
     val linearDamping: Double get() = body.linearDamping
     val angularDamping: Double get() = body.angularDamping
+    /** Circle and capsule radius; for polygons and segments, the bounding radius about the body origin. */
     val radius: Double get() = body.radius
     val shape: ShapeDef get() = body.shape
     val userData: Int get() = body.userData
     val bullet: Boolean get() = body.bullet
     val awake: Boolean get() = body.awake
+    val categoryBits: Int get() = body.categoryBits
+    val maskBits: Int get() = body.maskBits
+    val material: Int get() = body.material
 }

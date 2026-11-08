@@ -9,19 +9,24 @@ import androidx.compose.ui.Modifier
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.use
 import org.jetbrains.skia.EncodedImageFormat
+import io.github.itstrue54.gridironphysics.scenarios.Scenarios
 import java.io.File
 
 /**
  * Headless render of the viewer to a PNG, for docs and CI artifacts.
- * Usage: ./gradlew :physics-debug:snapshot -Pout=build/viewer.png -Pseconds=1.5
+ * Usage: ./gradlew :physics-debug:snapshot -Pout=build/viewer.png -Pseconds=1.5 [-Pscenario="Contact lab"] [-Pcolliders=true]
  */
 @OptIn(ExperimentalComposeUiApi::class)
 fun main(args: Array<String>) {
     val out = File(args.getOrElse(0) { "build/viewer.png" })
     val seconds = args.getOrElse(1) { "1.5" }.toDouble()
-    ImageComposeScene(width = 1500, height = 860).use { scene ->
+    val scenario = args.getOrNull(2)?.let { name -> Scenarios.all.first { it.name == name } } ?: Scenarios.all.first()
+    val colliders = args.getOrNull(3) == "true"
+    val width = args.getOrNull(4)?.toInt() ?: 1500
+    val height = args.getOrNull(5)?.toInt() ?: 860
+    ImageComposeScene(width = width, height = height).use { scene ->
         scene.setContent {
-            MaterialTheme(colorScheme = darkColorScheme()) { Surface(Modifier.fillMaxSize()) { ViewerApp() } }
+            MaterialTheme(colorScheme = darkColorScheme()) { Surface(Modifier.fillMaxSize()) { ViewerApp(scenario, colliders) } }
         }
         val frameNs = 1_000_000_000L / 60
         var t = 0L

@@ -2,6 +2,11 @@ package io.github.itstrue54.gridironphysics
 
 import io.github.itstrue54.gridironphysics.internal.BallState
 import io.github.itstrue54.gridironphysics.internal.Body
+import io.github.itstrue54.gridironphysics.internal.BroadPhase
+import io.github.itstrue54.gridironphysics.internal.BruteForceBroadPhase
+import io.github.itstrue54.gridironphysics.internal.Collide
+import io.github.itstrue54.gridironphysics.internal.Contact
+import io.github.itstrue54.gridironphysics.math.DMath
 import io.github.itstrue54.gridironphysics.math.Fnv1a64
 import io.github.itstrue54.gridironphysics.math.SplitMix64
 
@@ -34,6 +39,46 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
     private var highWater = 0
     private val view = BodyView()
 
+    // ---------------------------------------------------------------- collision state (all preallocated)
+
+    /** Runoff walls: engine-owned static geometry, not bodies (they never appear in [bodyIds]). */
+    private val walls: Array<Body> = makeWalls()
+    private val wallCount = if (config.runoffWalls) walls.size else 0
+    private val broad: BroadPhase = BruteForceBroadPhase()
+    private val proxyCap = config.maxBodies + walls.size
+    private val proxyActive = BooleanArray(proxyCap)
+    private val proxyMinX = DoubleArray(proxyCap)
+    private val proxyMinY = DoubleArray(proxyCap)
+    private val proxyMaxX = DoubleArray(proxyCap)
+    private val proxyMaxY = DoubleArray(proxyCap)
+    private val pairA = IntArray(config.maxContacts * 4)
+    private val pairB = IntArray(config.maxContacts * 4)
+    private var pairCount = 0
+    private var contacts = Array(config.maxContacts) { Contact() }
+    private var oldContacts = Array(config.maxContacts) { Contact() }
+    private var oldContactCount = 0
+    private val contactView = ContactView()
+
+    // Soft contact coefficients (Catto's soft step), fixed because the timestep is fixed.
+    private val softBiasRate: Double
+    private val softMassScale: Double
+    private val softImpulseScale: Double
+
+    init {
+        val h = WorldConfig.DT
+        val omega = 2.0 * DMath.PI * config.contactHertz
+        val a1 = 2.0 * config.contactDampingRatio + h * omega
+        val a2 = h * omega * a1
+        val a3 = 1.0 / (1.0 + a2)
+        softBiasRate = omega / a1
+        softMassScale = a2 * a3
+        softImpulseScale = a3
+    }
+
+    // Sleep islands: union-find over body slots.
+    private val islandParent = IntArray(config.maxBodies)
+    private val islandMinTime = DoubleArray(config.maxBodies)
+
     // ---------------------------------------------------------------- bodies
 
     /** Creates a body in the lowest free slot. Throws [IllegalStateException] when maxBodies are alive. */
@@ -51,13 +96,16 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
         }
         b.linearDamping = def.linearDamping; b.angularDamping = def.angularDamping
         b.userData = def.userData; b.bullet = def.bullet
-        val r = b.radius
+        b.categoryBits = def.categoryBits; b.maskBits = def.maskBits; b.material = def.material
+        b.extent = shapeExtent(def.shape)
         if (def.type == BodyType.Dynamic) {
             b.mass = def.mass
             b.invMass = 1.0 / def.mass
-            b.inertia = 0.5 * def.mass * r * r
+            b.inertia = inertiaAboutOrigin(def.shape, def.mass)
             b.invInertia = 1.0 / b.inertia
         }
+        b.geom.set(b.shape, b.x, b.y, b.angle)
+        b.x0 = b.x; b.y0 = b.y; b.angle0 = b.angle
         bodies[slot] = b
         liveCount++
         if (slot >= highWater) highWater = slot + 1
@@ -66,7 +114,12 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
     }
 
     fun destroyBody(id: BodyId) {
-        live(id)
+        val dead = live(id)
+        // Bodies resting against this one must not stay asleep against nothing.
+        for (i in 0 until contactCount) {
+            val c = contacts[i]
+            if (c.a === dead) wake(c.b!!) else if (c.b === dead) wake(c.a!!)
+        }
         val slot = id.slot
         bodies[slot] = null
         generations[slot] = (generations[slot] + 1) and BodyId.GEN_MASK
@@ -103,6 +156,29 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
         val b = bodies[slot]
         require(b != null && b.id == id.value) { "Body ${id.value} was destroyed" }
         return b
+    }
+
+    private fun wake(b: Body) {
+        if (b.type == BodyType.Dynamic && !b.awake) {
+            b.awake = true
+            b.sleepTime = 0.0
+        }
+    }
+
+    // ---------------------------------------------------------------- contacts
+
+    /**
+     * Number of contacts found by the last step, sorted by (lower body id, higher body id), with a body's
+     * runoff-wall contacts after its body contacts. Destroying a body leaves its contacts listed until the next step.
+     */
+    var contactCount: Int = 0
+        private set
+
+    /** Read-only view of contact [index] from the last step. The returned object is reused by the next call. */
+    fun contact(index: Int): ContactView {
+        require(index in 0 until contactCount) { "contact $index out of range 0 until $contactCount" }
+        contactView.c = contacts[index]
+        return contactView
     }
 
     // ---------------------------------------------------------------- frame accumulator
@@ -159,7 +235,7 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
         val dt = WorldConfig.DT
         for (i in 0 until highWater) {
             val b = bodies[i] ?: continue
-            if (b.type != BodyType.Dynamic) continue
+            if (b.type != BodyType.Dynamic || !b.awake) continue
             // Forces arrive in M3. Damping uses the Box2D form, stable for any damping value.
             b.vx *= 1.0 / (1.0 + dt * b.linearDamping)
             b.vy *= 1.0 / (1.0 + dt * b.linearDamping)
@@ -167,16 +243,195 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
         }
     }
 
+    private fun proxyBody(p: Int): Body = if (p < highWater) bodies[p]!! else walls[p - highWater]
+
+    /** Refreshes world-space shapes and fat AABBs, then finds candidate pairs in (lower id, higher id) order. */
     private fun broadPhase() {
-        // M2: candidate pairs sorted by (minId, maxId).
+        val dt = WorldConfig.DT
+        val n = highWater + wallCount
+        for (p in 0 until n) {
+            val b = if (p < highWater) bodies[p] else walls[p - highWater]
+            if (b == null) { proxyActive[p] = false; continue }
+            proxyActive[p] = true
+            b.x0 = b.x; b.y0 = b.y; b.angle0 = b.angle
+            if (b.type != BodyType.Static) b.geom.set(b.shape, b.x, b.y, b.angle)
+            b.speedBound = if (b.active) DMath.hypot2(b.vx, b.vy) + DMath.abs(b.angularVelocity) * b.extent else 0.0
+            val fat = 0.5 * Collide.SPECULATIVE + b.speedBound * dt
+            val g = b.geom
+            proxyMinX[p] = g.minX - fat; proxyMinY[p] = g.minY - fat
+            proxyMaxX[p] = g.maxX + fat; proxyMaxY[p] = g.maxY + fat
+        }
+        pairCount = broad.findPairs(n, proxyActive, proxyMinX, proxyMinY, proxyMaxX, proxyMaxY, pairA, pairB)
     }
 
+    private fun shouldCollide(a: Body, b: Body): Boolean {
+        if (a.type != BodyType.Dynamic && b.type != BodyType.Dynamic) return false
+        if (!a.active && !b.active) return false
+        return (a.categoryBits and b.maskBits) != 0 && (b.categoryBits and a.maskBits) != 0
+    }
+
+    private fun sortKey(b: Body): Long = if (b.id >= 0) b.id.toLong() else WALL_KEY_BASE + (-1 - b.id)
+
+    /**
+     * Builds manifolds for candidate pairs. The speculative margin covers how far the pair can close in one
+     * tick, so fast players meet surface to surface instead of overlapping first. Impulses carry over from
+     * the last tick by matching feature ids (warm start).
+     */
     private fun narrowPhase() {
-        // M2: contact manifolds.
+        val swap = oldContacts; oldContacts = contacts; contacts = swap
+        oldContactCount = contactCount
+        var count = 0
+        var old = 0
+        val mats = config.materials
+        for (k in 0 until pairCount) {
+            if (count == contacts.size) break
+            val a = proxyBody(pairA[k])
+            val b = proxyBody(pairB[k])
+            if (!shouldCollide(a, b)) continue
+            val c = contacts[count]
+            val margin = Collide.SPECULATIVE + WorldConfig.DT * (a.speedBound + b.speedBound)
+            Collide.collide(a.geom, b.geom, c.m, margin)
+            if (c.m.count == 0) continue
+            c.a = a; c.b = b
+            c.idA = a.id; c.idB = b.id
+            c.key = (sortKey(a) shl 32) or sortKey(b)
+            c.wall = if (b.id < 0) -1 - b.id else ContactView.NO_WALL
+            c.sensor = a.sensor || b.sensor ||
+                ((a.categoryBits and Category.BALL) != 0 && (b.categoryBits and Category.PLAYERS) != 0) ||
+                ((b.categoryBits and Category.BALL) != 0 && (a.categoryBits and Category.PLAYERS) != 0)
+            c.friction = mats.friction(a.material, b.material)
+            c.restitution = mats.restitution(a.material, b.material)
+            for (i in 0 until c.m.count) { c.normalImpulse[i] = 0.0; c.tangentImpulse[i] = 0.0 }
+            // Warm start: both lists are sorted by key, so one forward pass matches them.
+            while (old < oldContactCount && oldContacts[old].key < c.key) old++
+            if (old < oldContactCount && oldContacts[old].key == c.key) {
+                val o = oldContacts[old]
+                for (i in 0 until c.m.count) {
+                    for (j in 0 until o.m.count) {
+                        if (o.m.id[j] == c.m.id[i]) {
+                            c.normalImpulse[i] = o.normalImpulse[j]
+                            c.tangentImpulse[i] = o.tangentImpulse[j]
+                            break
+                        }
+                    }
+                }
+            }
+            if (!c.sensor) {
+                // A contact with something that moves wakes a sleeper.
+                if (a.active) wake(b)
+                if (b.active) wake(a)
+            }
+            count++
+        }
+        contactCount = count
+        // The old pool no longer describes the world; drop its body references.
+        for (i in 0 until oldContactCount) { oldContacts[i].a = null; oldContacts[i].b = null }
     }
 
+    /** Prepares every contact, applies the warm-start impulses, then runs the velocity iterations with soft bias. */
     private fun solveVelocities() {
-        // M2: warm start + contact/joint iterations.
+        for (i in 0 until contactCount) {
+            val c = contacts[i]
+            val a = c.a!!; val b = c.b!!
+            val mA = a.invMass; val iA = a.invInertia
+            val mB = b.invMass; val iB = b.invInertia
+            c.solve = !c.sensor && (mA + mB) > 0.0
+            if (!c.solve) continue
+            val m = c.m
+            val nx = m.nx; val ny = m.ny
+            val tx = ny; val ty = -nx
+            for (j in 0 until m.count) {
+                val rAx = m.px[j] - a.x; val rAy = m.py[j] - a.y
+                val rBx = m.px[j] - b.x; val rBy = m.py[j] - b.y
+                c.rAx[j] = rAx; c.rAy[j] = rAy; c.rBx[j] = rBx; c.rBy[j] = rBy
+                val rnA = rAx * ny - rAy * nx
+                val rnB = rBx * ny - rBy * nx
+                c.normalMass[j] = 1.0 / (mA + mB + iA * rnA * rnA + iB * rnB * rnB)
+                val rtA = rAx * ty - rAy * tx
+                val rtB = rBx * ty - rBy * tx
+                c.tangentMass[j] = 1.0 / (mA + mB + iA * rtA * rtA + iB * rtB * rtB)
+                val dvx = b.vx - b.angularVelocity * rBy - a.vx + a.angularVelocity * rAy
+                val dvy = b.vy + b.angularVelocity * rBx - a.vy - a.angularVelocity * rAx
+                c.relativeVelocity[j] = dvx * nx + dvy * ny
+                c.maxNormalImpulse[j] = 0.0
+            }
+            for (j in 0 until m.count) {
+                val px = c.normalImpulse[j] * nx + c.tangentImpulse[j] * tx
+                val py = c.normalImpulse[j] * ny + c.tangentImpulse[j] * ty
+                applyImpulse(a, b, c.rAx[j], c.rAy[j], c.rBx[j], c.rBy[j], px, py)
+            }
+        }
+        for (it in 0 until config.velocityIterations) {
+            for (i in 0 until contactCount) if (contacts[i].solve) solveContact(contacts[i], true)
+        }
+    }
+
+    private fun applyImpulse(a: Body, b: Body, rAx: Double, rAy: Double, rBx: Double, rBy: Double, px: Double, py: Double) {
+        a.vx -= a.invMass * px; a.vy -= a.invMass * py
+        a.angularVelocity -= a.invInertia * (rAx * py - rAy * px)
+        b.vx += b.invMass * px; b.vy += b.invMass * py
+        b.angularVelocity += b.invInertia * (rBx * py - rBy * px)
+    }
+
+    /**
+     * One sequential-impulse pass over a contact. With [useBias], penetration is pushed out softly (spring-damper,
+     * capped at maxPushoutSpeed); without it (relax), the contact is rigid and removes that push-out velocity.
+     * Speculative points (positive separation) let the bodies close exactly the remaining gap.
+     */
+    private fun solveContact(c: Contact, useBias: Boolean) {
+        val a = c.a!!; val b = c.b!!
+        val m = c.m
+        val nx = m.nx; val ny = m.ny
+        val tx = ny; val ty = -nx
+        val inv = 1.0 / WorldConfig.DT
+        val dpx = (b.x - b.x0) - (a.x - a.x0)
+        val dpy = (b.y - b.y0) - (a.y - a.y0)
+        val daA = a.angle - a.angle0
+        val daB = b.angle - b.angle0
+        for (j in 0 until m.count) {
+            val rAx = c.rAx[j]; val rAy = c.rAy[j]; val rBx = c.rBx[j]; val rBy = c.rBy[j]
+            // Current separation: manifold value plus how far the anchors moved apart along the normal this step
+            // (rotation linearized: a small turn dθ moves an anchor r by dθ × r).
+            val dx = dpx - daB * rBy + daA * rAy
+            val dy = dpy + daB * rBx - daA * rAx
+            val s = m.sep[j] + dx * nx + dy * ny
+            val bias: Double
+            var massScale = 1.0
+            var impulseScale = 0.0
+            if (s > 0.0) {
+                bias = s * inv
+            } else if (useBias) {
+                bias = DMath.max(softBiasRate * s, -config.maxPushoutSpeed)
+                massScale = softMassScale
+                impulseScale = softImpulseScale
+            } else {
+                bias = 0.0
+            }
+            val dvx = b.vx - b.angularVelocity * rBy - a.vx + a.angularVelocity * rAy
+            val dvy = b.vy + b.angularVelocity * rBx - a.vy - a.angularVelocity * rAx
+            val vn = dvx * nx + dvy * ny
+            val old = c.normalImpulse[j]
+            var impulse = -c.normalMass[j] * massScale * (vn + bias) - impulseScale * old
+            val acc = DMath.max(old + impulse, 0.0)
+            impulse = acc - old
+            c.normalImpulse[j] = acc
+            if (impulse > c.maxNormalImpulse[j]) c.maxNormalImpulse[j] = impulse
+            applyImpulse(a, b, rAx, rAy, rBx, rBy, impulse * nx, impulse * ny)
+        }
+        val mu = c.friction
+        if (mu == 0.0) return
+        for (j in 0 until m.count) {
+            val rAx = c.rAx[j]; val rAy = c.rAy[j]; val rBx = c.rBx[j]; val rBy = c.rBy[j]
+            val dvx = b.vx - b.angularVelocity * rBy - a.vx + a.angularVelocity * rAy
+            val dvy = b.vy + b.angularVelocity * rBx - a.vy - a.angularVelocity * rAx
+            val vt = dvx * tx + dvy * ty
+            val old = c.tangentImpulse[j]
+            val limit = mu * c.normalImpulse[j]
+            val acc = DMath.clamp(old - c.tangentMass[j] * vt, -limit, limit)
+            c.tangentImpulse[j] = acc
+            val impulse = acc - old
+            applyImpulse(a, b, rAx, rAy, rBx, rBy, impulse * tx, impulse * ty)
+        }
     }
 
     private fun integratePositions() {
@@ -185,15 +440,40 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
             val b = bodies[i] ?: continue
             b.prevX = b.x
             b.prevY = b.y
-            if (b.type == BodyType.Static) continue
+            if (b.type == BodyType.Static || !b.awake) continue
             b.x += b.vx * dt
             b.y += b.vy * dt
             b.angle += b.angularVelocity * dt
         }
     }
 
+    /** Rigid (unbiased) iterations that remove push-out velocity, then restitution against pre-solve closing speed. */
     private fun relax() {
-        // M2: soft position correction.
+        for (it in 0 until config.relaxIterations) {
+            for (i in 0 until contactCount) if (contacts[i].solve) solveContact(contacts[i], false)
+        }
+        val threshold = config.restitutionThreshold
+        for (i in 0 until contactCount) {
+            val c = contacts[i]
+            if (!c.solve || c.restitution == 0.0) continue
+            val a = c.a!!; val b = c.b!!
+            val m = c.m
+            val nx = m.nx; val ny = m.ny
+            for (j in 0 until m.count) {
+                if (c.relativeVelocity[j] > -threshold || c.maxNormalImpulse[j] == 0.0) continue
+                val rAx = c.rAx[j]; val rAy = c.rAy[j]; val rBx = c.rBx[j]; val rBy = c.rBy[j]
+                val dvx = b.vx - b.angularVelocity * rBy - a.vx + a.angularVelocity * rAy
+                val dvy = b.vy + b.angularVelocity * rBx - a.vy - a.angularVelocity * rAx
+                val vn = dvx * nx + dvy * ny
+                val old = c.normalImpulse[j]
+                var impulse = -c.normalMass[j] * (vn + c.restitution * c.relativeVelocity[j])
+                val acc = DMath.max(old + impulse, 0.0)
+                impulse = acc - old
+                c.normalImpulse[j] = acc
+                if (impulse > c.maxNormalImpulse[j]) c.maxNormalImpulse[j] = impulse
+                applyImpulse(a, b, rAx, rAy, rBx, rBy, impulse * nx, impulse * ny)
+            }
+        }
     }
 
     private fun ballFlight() {
@@ -205,9 +485,67 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
     }
 
     private fun bookkeeping() {
-        // M2: sleep states.
+        updateSleep()
         tick++
         if (config.hashEveryTick) lastTickHash = stateHash()
+    }
+
+    // ---------------------------------------------------------------- sleeping
+
+    private fun islandRoot(i: Int): Int {
+        var r = i
+        while (islandParent[r] != r) r = islandParent[r]
+        var j = i
+        while (islandParent[j] != r) { val next = islandParent[j]; islandParent[j] = r; j = next }
+        return r
+    }
+
+    /**
+     * A body is sleepy after [WorldConfig.sleepTimeS] below [WorldConfig.sleepSpeed]. Touching awake bodies form
+     * an island, and an island sleeps only when all of its bodies are sleepy, so a resting pile never wakes
+     * itself up one body at a time. A dynamic body touching a moving kinematic body never gets sleepy.
+     */
+    private fun updateSleep() {
+        val dt = WorldConfig.DT
+        val vMax = config.sleepSpeed
+        for (i in 0 until highWater) {
+            val b = bodies[i] ?: continue
+            if (b.type != BodyType.Dynamic || !b.awake) continue
+            val fast = b.vx * b.vx + b.vy * b.vy > vMax * vMax || DMath.abs(b.angularVelocity) * b.extent > vMax
+            b.sleepTime = if (fast) 0.0 else b.sleepTime + dt
+            islandParent[i] = i
+            islandMinTime[i] = Double.MAX_VALUE
+        }
+        for (k in 0 until contactCount) {
+            val c = contacts[k]
+            if (c.sensor) continue
+            val a = c.a!!; val b = c.b!!
+            val aLive = a.type == BodyType.Dynamic && a.awake
+            val bLive = b.type == BodyType.Dynamic && b.awake
+            if (aLive && bLive) {
+                val ra = islandRoot(BodyId(a.id).slot)
+                val rb = islandRoot(BodyId(b.id).slot)
+                if (ra < rb) islandParent[rb] = ra else if (rb < ra) islandParent[ra] = rb
+            } else if (aLive && b.type == BodyType.Kinematic && b.active) {
+                a.sleepTime = 0.0
+            } else if (bLive && a.type == BodyType.Kinematic && a.active) {
+                b.sleepTime = 0.0
+            }
+        }
+        for (i in 0 until highWater) {
+            val b = bodies[i] ?: continue
+            if (b.type != BodyType.Dynamic || !b.awake) continue
+            val r = islandRoot(i)
+            if (b.sleepTime < islandMinTime[r]) islandMinTime[r] = b.sleepTime
+        }
+        for (i in 0 until highWater) {
+            val b = bodies[i] ?: continue
+            if (b.type != BodyType.Dynamic || !b.awake) continue
+            if (islandMinTime[islandRoot(i)] >= config.sleepTimeS) {
+                b.awake = false
+                b.vx = 0.0; b.vy = 0.0; b.angularVelocity = 0.0
+            }
+        }
     }
 
     // ---------------------------------------------------------------- determinism
@@ -243,8 +581,78 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
         return h
     }
 
+    private fun makeWalls(): Array<Body> {
+        val f = field
+        val x0 = -f.runoffM
+        val y0 = -f.runoffM
+        val x1 = f.lengthM + f.runoffM
+        val y1 = f.widthM + f.runoffM
+        val shapes = arrayOf(
+            ShapeDef.Segment(x0, y0, x1, y0), // WALL_NEAR
+            ShapeDef.Segment(x0, y1, x1, y1), // WALL_FAR
+            ShapeDef.Segment(x0, y0, x0, y1), // WALL_HOME
+            ShapeDef.Segment(x1, y0, x1, y1), // WALL_AWAY
+        )
+        return Array(shapes.size) { k ->
+            val w = Body(-1 - k, BodyType.Static, shapes[k])
+            w.categoryBits = Category.STATIC
+            w.maskBits = Category.ALL
+            w.material = Material.STRUCTURE
+            w.extent = shapeExtent(w.shape)
+            w.geom.set(w.shape, 0.0, 0.0, 0.0)
+            w
+        }
+    }
+
     private companion object {
         /** 1 ns of slack so frame times that sum to whole ticks are not lost to rounding. */
         const val ADVANCE_EPS = 1e-9
+
+        /** Runoff walls sort after every body id (ids are non-negative Ints). */
+        const val WALL_KEY_BASE = 0x80000000L
+
+        /** Largest distance from the body origin to any point of [shape]. */
+        fun shapeExtent(shape: ShapeDef): Double = when (shape) {
+            is ShapeDef.Circle -> shape.radius
+            is ShapeDef.Capsule -> shape.halfLength + shape.radius
+            is ShapeDef.Segment -> DMath.max(DMath.hypot2(shape.x1, shape.y1), DMath.hypot2(shape.x2, shape.y2))
+            is ShapeDef.Polygon -> {
+                var r = 0.0
+                for (i in 0 until shape.count) r = DMath.max(r, DMath.hypot2(shape.vertex(2 * i), shape.vertex(2 * i + 1)))
+                r
+            }
+        }
+
+        /** Rotational inertia about the body origin (the center of mass) for uniform density. */
+        fun inertiaAboutOrigin(shape: ShapeDef, mass: Double): Double = when (shape) {
+            is ShapeDef.Circle -> 0.5 * mass * shape.radius * shape.radius
+            is ShapeDef.Capsule -> {
+                val h = shape.halfLength
+                val r = shape.radius
+                val rectArea = 4.0 * h * r
+                val circleArea = DMath.PI * r * r
+                val mRect = mass * rectArea / (rectArea + circleArea)
+                val mCircle = mass - mRect
+                // Each half-disk's centroid sits 4r/(3π) beyond its segment end.
+                val lc = 4.0 * r / (3.0 * DMath.PI)
+                mRect * (4.0 * h * h + 4.0 * r * r) / 12.0 + mCircle * (0.5 * r * r + h * h + 2.0 * h * lc)
+            }
+            is ShapeDef.Polygon -> {
+                var area2 = 0.0
+                var sum = 0.0
+                val n = shape.count
+                for (i in 0 until n) {
+                    val j = if (i + 1 == n) 0 else i + 1
+                    val x1 = shape.vertex(2 * i); val y1 = shape.vertex(2 * i + 1)
+                    val x2 = shape.vertex(2 * j); val y2 = shape.vertex(2 * j + 1)
+                    val cross = x1 * y2 - x2 * y1
+                    area2 += cross
+                    sum += cross * (x1 * x1 + x1 * x2 + x2 * x2 + y1 * y1 + y1 * y2 + y2 * y2)
+                }
+                // I = (ρ/12) Σ cross·(…) with ρ = mass / area = 2·mass / area2.
+                mass * sum / (6.0 * area2)
+            }
+            is ShapeDef.Segment -> 0.0 // static only
+        }
     }
 }

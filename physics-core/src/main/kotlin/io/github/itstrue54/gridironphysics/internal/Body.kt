@@ -26,9 +26,42 @@ internal class Body(
     @JvmField var userData = 0
     @JvmField var bullet = false
     @JvmField var awake = true
+    @JvmField var categoryBits = 0
+    @JvmField var maskBits = 0
+    @JvmField var material = 0
 
+    /** Seconds spent below the sleep speed. */
+    @JvmField var sleepTime = 0.0
+
+    /** Largest distance from the body origin to any point of the shape. */
+    @JvmField var extent = 0.0
+
+    /** World-space shape, refreshed in the broad phase. */
+    @JvmField val geom = Geom()
+
+    /** Pose at the start of the current step; the relax phase measures motion from it. */
+    @JvmField var x0 = 0.0
+    @JvmField var y0 = 0.0
+    @JvmField var angle0 = 0.0
+
+    /** Upper bound on how fast any point of the body moves (m/s), for speculative margins. */
+    @JvmField var speedBound = 0.0
+
+    val sensor: Boolean get() = shape.sensor
+
+    /** Circle and capsule radius; for polygons and segments, the bounding radius about the origin. */
     val radius: Double
         get() = when (val s = shape) {
             is ShapeDef.Circle -> s.radius
+            is ShapeDef.Capsule -> s.radius
+            else -> extent
+        }
+
+    /** Dynamic and awake, or kinematic and moving: a body whose contacts must be computed. */
+    val active: Boolean
+        get() = when (type) {
+            BodyType.Dynamic -> awake
+            BodyType.Kinematic -> vx != 0.0 || vy != 0.0 || angularVelocity != 0.0
+            BodyType.Static -> false
         }
 }
