@@ -6,6 +6,7 @@ import io.github.itstrue54.gridironphysics.internal.BroadPhase
 import io.github.itstrue54.gridironphysics.internal.BruteForceBroadPhase
 import io.github.itstrue54.gridironphysics.internal.Collide
 import io.github.itstrue54.gridironphysics.internal.Contact
+import io.github.itstrue54.gridironphysics.internal.LocomotionController
 import io.github.itstrue54.gridironphysics.math.DMath
 import io.github.itstrue54.gridironphysics.math.Fnv1a64
 import io.github.itstrue54.gridironphysics.math.SplitMix64
@@ -97,6 +98,7 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
         b.linearDamping = def.linearDamping; b.angularDamping = def.angularDamping
         b.userData = def.userData; b.bullet = def.bullet
         b.categoryBits = def.categoryBits; b.maskBits = def.maskBits; b.material = def.material
+        b.baseMaterial = def.material
         b.extent = shapeExtent(def.shape)
         if (def.type == BodyType.Dynamic) {
             b.mass = def.mass
@@ -165,6 +167,105 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
         }
     }
 
+    // ---------------------------------------------------------------- locomotion
+
+    /** The playing surface; it scales every athlete's traction. */
+    var surface: SurfaceConfig = SurfaceConfig.ARTIFICIAL_TURF
+        private set
+
+    fun setSurface(surface: SurfaceConfig) {
+        this.surface = surface
+        recorder?.onSetSurface(tick, surface)
+    }
+
+    /** Gives a dynamic body an athlete's limits, which it needs before [setIntent]. */
+    fun setAthlete(id: BodyId, params: AthleteParams) {
+        val b = live(id)
+        require(b.type == BodyType.Dynamic) { "Only dynamic bodies can have an athlete: body ${id.value} is ${b.type}" }
+        val c = b.loco
+        if (c == null) b.loco = LocomotionController(params) else c.params = params
+        recorder?.onSetAthlete(tick, id, params)
+    }
+
+    /**
+     * Sets what the player tries to do from the next tick on, and switches stance when [LocomotionIntent.stance]
+     * is not null. The values are copied, so the game can reuse [intent]. Wakes the body.
+     */
+    fun setIntent(id: BodyId, intent: LocomotionIntent) {
+        val b = live(id)
+        val c = checkNotNull(b.loco) { "Body ${id.value} has no athlete: call setAthlete first" }
+        intent.validate()
+        val stance = intent.stance
+        if (stance != null) checkStanceBody(b)
+        c.intent.copyFrom(intent)
+        if (stance != null) applyStance(b, stance)
+        wake(b)
+        recorder?.onSetIntent(tick, id, intent)
+    }
+
+    /**
+     * Switches stance and swaps the collider in place: Upright is the circle the body was created with; Diving
+     * and Down are a capsule along the body angle (Down also uses [Material.DOWNED_PLAYER]). Mass stays; the
+     * rotational inertia follows the shape. Only dynamic bodies created with a circle have stances. Wakes the body.
+     * A Diving or Down body with an athlete ([setAthlete]) slides, braked by [WorldConfig.slideFriction], and
+     * ignores its intent until it is Upright again; one without an athlete just coasts under its damping.
+     */
+    fun setStance(id: BodyId, stance: Stance) {
+        val b = live(id)
+        checkStanceBody(b)
+        applyStance(b, stance)
+        wake(b)
+        recorder?.onSetStance(tick, id, stance)
+    }
+
+    private fun checkStanceBody(b: Body) {
+        require(b.type == BodyType.Dynamic) { "Only dynamic bodies have a stance: body ${b.id} is ${b.type}" }
+        require(b.uprightShape is ShapeDef.Circle) { "Stance needs a body created with a Circle (its Upright collider): body ${b.id} is ${b.uprightShape}" }
+    }
+
+    private fun applyStance(b: Body, stance: Stance) {
+        val up = b.uprightShape as ShapeDef.Circle
+        val shape: ShapeDef = if (stance == Stance.Upright) {
+            up
+        } else {
+            b.lyingShape ?: ShapeDef.Capsule(LYING_HALF_LENGTH * up.radius, LYING_RADIUS * up.radius, up.sensor).also { b.lyingShape = it }
+        }
+        b.stance = stance
+        b.material = if (stance == Stance.Down) Material.DOWNED_PLAYER else b.baseMaterial
+        if (shape !== b.shape) {
+            b.shape = shape
+            b.extent = shapeExtent(shape)
+            b.inertia = inertiaAboutOrigin(shape, b.mass)
+            b.invInertia = 1.0 / b.inertia
+            b.geom.set(shape, b.x, b.y, b.angle)
+        }
+    }
+
+    // ---------------------------------------------------------------- slip (temporary, until M4's EventReader)
+
+    // A Slip is reported when an intent asks for more horizontal acceleration than traction allows; the engine
+    // clamps it and the game decides whether that is a stumble. These three accessors are a stopgap: M4 replaces
+    // them with Slip events in the event ring buffer.
+
+    private val slipIds = IntArray(config.maxBodies)
+    private val slipExcesses = DoubleArray(config.maxBodies)
+
+    /** TEMPORARY (M3, replaced by M4's EventReader): number of Slip reports from the last step. */
+    var slipCount: Int = 0
+        private set
+
+    /** TEMPORARY (M3): body of Slip report [index]. Reports are in ascending body id order. */
+    fun slipBody(index: Int): BodyId {
+        require(index in 0 until slipCount) { "slip $index out of range 0 until $slipCount" }
+        return BodyId(slipIds[index])
+    }
+
+    /** TEMPORARY (M3): acceleration (m/s²) the intent asked for beyond the traction limit in report [index]. */
+    fun slipExcess(index: Int): Double {
+        require(index in 0 until slipCount) { "slip $index out of range 0 until $slipCount" }
+        return slipExcesses[index]
+    }
+
     // ---------------------------------------------------------------- contacts
 
     /**
@@ -227,8 +328,22 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
         bookkeeping()
     }
 
+    /** Each awake player's locomotion controller turns its intent into a force, clamped by traction. */
     private fun applyIntents() {
-        // M3: locomotion controllers turn intents into forces.
+        slipCount = 0
+        val surfaceGrip = surface.tractionMultiplier * config.gravity
+        val slideGrip = config.slideFriction * surfaceGrip
+        for (i in 0 until highWater) {
+            val b = bodies[i] ?: continue
+            val c = b.loco ?: continue
+            if (!b.awake) continue
+            c.drive(b, c.params.traction * surfaceGrip, slideGrip)
+            if (c.slip > 0.0) {
+                slipIds[slipCount] = b.id
+                slipExcesses[slipCount] = c.slip
+                slipCount++
+            }
+        }
     }
 
     private fun integrateVelocities() {
@@ -236,7 +351,10 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
         for (i in 0 until highWater) {
             val b = bodies[i] ?: continue
             if (b.type != BodyType.Dynamic || !b.awake) continue
-            // Forces arrive in M3. Damping uses the Box2D form, stable for any damping value.
+            b.vx += b.fx * b.invMass * dt
+            b.vy += b.fy * b.invMass * dt
+            b.fx = 0.0; b.fy = 0.0
+            // Damping uses the Box2D form, stable for any damping value.
             b.vx *= 1.0 / (1.0 + dt * b.linearDamping)
             b.vy *= 1.0 / (1.0 + dt * b.linearDamping)
             b.angularVelocity *= 1.0 / (1.0 + dt * b.angularDamping)
@@ -511,7 +629,8 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
         for (i in 0 until highWater) {
             val b = bodies[i] ?: continue
             if (b.type != BodyType.Dynamic || !b.awake) continue
-            val fast = b.vx * b.vx + b.vy * b.vy > vMax * vMax || DMath.abs(b.angularVelocity) * b.extent > vMax
+            val fast = b.vx * b.vx + b.vy * b.vy > vMax * vMax || DMath.abs(b.angularVelocity) * b.extent > vMax ||
+                b.loco?.wantsMotion == true // a player trying to move never falls asleep
             b.sleepTime = if (fast) 0.0 else b.sleepTime + dt
             islandParent[i] = i
             islandMinTime[i] = Double.MAX_VALUE
@@ -607,6 +726,10 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
     private companion object {
         /** 1 ns of slack so frame times that sum to whole ticks are not lost to rounding. */
         const val ADVANCE_EPS = 1e-9
+
+        /** Lying capsule for Diving and Down, in multiples of the upright radius: 0.34 m → 1.77 m long, 0.20 m thick. */
+        const val LYING_HALF_LENGTH = 2.0
+        const val LYING_RADIUS = 0.6
 
         /** Runoff walls sort after every body id (ids are non-negative Ints). */
         const val WALL_KEY_BASE = 0x80000000L

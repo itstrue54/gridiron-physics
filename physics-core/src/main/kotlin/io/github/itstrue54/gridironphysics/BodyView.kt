@@ -36,4 +36,8 @@ class BodyView internal constructor() {
     val categoryBits: Int get() = body.categoryBits
     val maskBits: Int get() = body.maskBits
     val material: Int get() = body.material
+    val stance: Stance get() = body.stance
+
+    /** The athlete set with [World.setAthlete], or null for a body without locomotion. */
+    val athlete: AthleteParams? get() = body.loco?.params
 }

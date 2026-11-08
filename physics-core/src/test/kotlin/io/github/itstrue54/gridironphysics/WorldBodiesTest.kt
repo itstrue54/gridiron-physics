@@ -140,6 +140,10 @@ class WorldBodiesTest {
         w.recorder = object : CommandRecorder {
             override fun onCreateBody(tick: Long, id: BodyId, def: BodyDef) { log += "c:${id.value}@$tick" }
             override fun onDestroyBody(tick: Long, id: BodyId) { log += "d:${id.value}@$tick" }
+            override fun onSetAthlete(tick: Long, id: BodyId, params: AthleteParams) {}
+            override fun onSetIntent(tick: Long, id: BodyId, intent: LocomotionIntent) {}
+            override fun onSetStance(tick: Long, id: BodyId, stance: Stance) {}
+            override fun onSetSurface(tick: Long, surface: SurfaceConfig) {}
         }
         val id = w.createBody(BodyDef())
         w.step()
