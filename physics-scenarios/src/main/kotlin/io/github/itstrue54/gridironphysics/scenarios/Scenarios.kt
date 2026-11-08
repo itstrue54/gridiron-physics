@@ -7,10 +7,37 @@ import io.github.itstrue54.gridironphysics.BodyType
 import io.github.itstrue54.gridironphysics.Category
 import io.github.itstrue54.gridironphysics.Material
 import io.github.itstrue54.gridironphysics.ShapeDef
+import io.github.itstrue54.gridironphysics.Stance
 import io.github.itstrue54.gridironphysics.math.DMath
 
 /** Every scenario, in the order the viewer lists them. Later milestones add the spec's other setups. */
 object Scenarios {
+
+    /**
+     * M4: one of each event near the away end zone. Two players collide (Hit), a runner trips over a Down player
+     * (Trip), a receiver breaks the goal line and runs out over the end line (GoalLineCrossed, OutOfBounds), and a
+     * runner cuts hard toward the near sideline (Slip, then OutOfBounds). The viewer overlays each event.
+     */
+    val eventLab = scenario(
+        name = "Event lab",
+        description = "Hit, trip, slip, goal line and out of bounds near the away end zone; events overlaid (M4)",
+        seed = 17L,
+    ) {
+        val fast = AthleteParams(maxSpeed = 9.0, maxAccel = 7.5, maxDecel = 8.0, turnRateAtRest = 12.0, turnRateAtMax = 2.5)
+        val slow = AthleteParams(maxSpeed = 7.0, maxAccel = 6.5, maxDecel = 8.0, turnRateAtRest = 10.0, turnRateAtMax = 2.5)
+        val gl = field.awayGoalLineX
+        // Hit: head-on, slightly off-center.
+        athlete(gl - 11.0, 30.0, 92.0, 0.32, Tags.HOME, fast, LocomotionIntent.velocity(8.5, 0.0), vx = 8.5)
+        athlete(gl - 3.0, 30.15, 112.0, 0.36, Tags.AWAY, slow, LocomotionIntent.velocity(-7.0, 0.0), vx = -7.0)
+        // Trip: a runner straight into a player lying on the ground.
+        val down = player(gl - 5.5, 20.0, mass = 105.0, radius = 0.34, damping = 2.0, tag = Tags.AWAY)
+        world.setStance(down, Stance.Down)
+        athlete(gl - 11.5, 20.2, 95.0, 0.33, Tags.HOME, fast, LocomotionIntent.velocity(8.0, 0.0), vx = 8.0)
+        // Goal line, then out over the end line.
+        athlete(gl - 5.5, 40.0, 88.0, 0.32, Tags.HOME, fast, LocomotionIntent.velocity(8.0, 3.0), vx = 8.0, vy = 3.0)
+        // Slip: a hard cut from running downfield to running at the near sideline.
+        athlete(gl - 12.5, 9.0, 95.0, 0.33, Tags.HOME, fast, LocomotionIntent.velocity(0.0, -8.5), vx = 8.5)
+    }
 
     /**
      * M3: the spec's head-on tackle on locomotion: a 90 kg back at 9 m/s and a 115 kg linebacker at 7 m/s run
@@ -167,7 +194,7 @@ object Scenarios {
         prop(x = field.homeGoalLineX, y = field.widthM / 2, radius = 0.5)
     }
 
-    val all: List<Scenario> = listOf(headOnTackle, sidelineRun, contactLab, drift)
+    val all: List<Scenario> = listOf(headOnTackle, sidelineRun, eventLab, contactLab, drift)
 
     /** Angular damping for coasting bodies (no locomotion holds their heading). */
     private const val SPIN_DAMPING = 8.0

@@ -125,6 +125,7 @@ fun ViewerApp(initial: Scenario = Scenarios.all.first(), showColliders: Boolean 
                 drawRunoffWalls(t, state.world.config.runoffWalls)
                 drawBodies(t, state)
                 drawContacts(t, state, textMeasurer)
+                drawEvents(t, state, textMeasurer)
             }
             InspectPanel(state, frameNo)
         }
@@ -191,6 +192,9 @@ private fun InspectPanel(state: ViewerState, frameNo: Long) {
         @Suppress("UNUSED_EXPRESSION") frameNo
         Text("stateHash ${java.lang.Long.toHexString(state.world.stateHash())}", fontFamily = FontFamily.Monospace, fontSize = 12.sp)
         Text("contacts ${state.world.contactCount}", fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+        Spacer(Modifier.width(1.dp).padding(4.dp))
+        Text("events (newest first)", fontSize = 13.sp)
+        state.eventLog.forEach { Text(it, fontFamily = FontFamily.Monospace, fontSize = 11.sp, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) }
         Spacer(Modifier.width(1.dp).padding(4.dp))
         val id = state.selected
         if (id == null) {

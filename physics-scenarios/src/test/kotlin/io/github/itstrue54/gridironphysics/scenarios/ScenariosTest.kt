@@ -2,6 +2,7 @@ package io.github.itstrue54.gridironphysics.scenarios
 
 import io.github.itstrue54.gridironphysics.BodyId
 import io.github.itstrue54.gridironphysics.BodyType
+import io.github.itstrue54.gridironphysics.EventType
 import io.github.itstrue54.gridironphysics.ShapeDef
 import io.github.itstrue54.gridironphysics.World
 import io.github.itstrue54.gridironphysics.math.DMath
@@ -270,7 +271,8 @@ class ScenariosTest {
                     }
                 }
                 if (hitTick < 0) assertEquals(y0, w.body(s.carrier).y, 1e-9, "carrier runs a straight line until the hit")
-                for (i in 0 until w.slipCount) assertTrue(w.slipBody(i) != s.carrier, "no slip running straight")
+                val ev = w.events()
+                while (ev.next()) if (ev.type == EventType.Slip) assertTrue(ev.bodyA != s.carrier, "no slip running straight")
             }
         }
         assertTrue(hitTick in 0 until 150, "pursuer intercepts within 2.5 s, hit at tick $hitTick")
@@ -291,11 +293,40 @@ class ScenariosTest {
         }
     }
 
+    // ------------------------------------------------------------ M4: event lab
+
+    private fun eventLabEvents(ticks: Int): List<Triple<EventType, Long, Int>> {
+        val w = Scenarios.eventLab.build()
+        val r = w.events()
+        val out = ArrayList<Triple<EventType, Long, Int>>()
+        repeat(ticks) {
+            w.step()
+            while (r.next()) out += Triple(r.type, r.tick, if (r.type == EventType.GoalLineCrossed) r.direction * 10 + r.line else r.line)
+        }
+        return out
+    }
+
+    @Test fun eventLabShowsEveryKindOfEventWithinThreeSeconds() {
+        val evs = eventLabEvents(180)
+        val kinds = evs.map { it.first }.toSet()
+        for (k in listOf(EventType.Slip, EventType.ContactBegin, EventType.ContactEnd, EventType.Hit, EventType.Trip, EventType.SensorBegin, EventType.SensorEnd, EventType.OutOfBounds, EventType.GoalLineCrossed)) {
+            assertTrue(k in kinds, "event lab never shows $k: $kinds")
+        }
+        // The goal-line runner breaks the away goal line heading downfield, then runs out over the end line.
+        assertTrue(evs.any { it.first == EventType.GoalLineCrossed && it.third == 10 + io.github.itstrue54.gridironphysics.FieldLine.AWAY_GOAL_LINE })
+        assertTrue(evs.any { it.first == EventType.OutOfBounds && it.third == io.github.itstrue54.gridironphysics.FieldLine.AWAY_END_LINE })
+    }
+
+    @Test fun eventLabIsDeterministic() {
+        assertEquals(eventLabEvents(240), eventLabEvents(240))
+    }
+
     @Test fun registryListsDrift() {
         assertTrue(Scenarios.drift in Scenarios.all)
         assertTrue(Scenarios.sidelineRun in Scenarios.all)
         assertTrue(Scenarios.headOnTackle in Scenarios.all)
         assertTrue(Scenarios.contactLab in Scenarios.all)
+        assertTrue(Scenarios.eventLab in Scenarios.all)
         assertEquals(Scenarios.all.size, Scenarios.all.map { it.name }.toSet().size, "scenario names are unique")
     }
 }

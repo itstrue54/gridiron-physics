@@ -54,6 +54,13 @@ object DMath {
 
     /** Exact on every platform (no rounding involved). */
     fun floor(a: Double): Double = StrictMath.floor(a)
+    /** Wraps an angle to (−π, π]. */
+    fun wrapPi(a: Double): Double {
+        var r = a - 2.0 * PI * floor((a + PI) / (2.0 * PI))
+        if (r <= -PI) r += 2.0 * PI
+        return r
+    }
+
     fun clamp(v: Double, lo: Double, hi: Double): Double = if (v < lo) lo else if (v > hi) hi else v
 
     /** sqrt(x² + y²). Deliberately not StrictMath.hypot: that is slower and we never overflow. */

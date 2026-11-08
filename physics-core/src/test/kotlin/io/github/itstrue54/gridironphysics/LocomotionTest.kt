@@ -135,7 +135,9 @@ class LocomotionTest {
 
     // ------------------------------------------------------------ traction and slip
 
-    @Test fun slipListResetsEveryTickAndNamesTheBody() {
+    private fun slips(w: World) = w.drain().filter { it.type == EventType.Slip }
+
+    @Test fun slipEventNamesTheBodyOnlyWhileItSlips() {
         val ap = grippy.copy(traction = 0.9)
         val w = world()
         val a = runner(w, vx = 9.0, ap = ap)
@@ -143,14 +145,14 @@ class LocomotionTest {
         w.setIntent(a, LocomotionIntent.velocity(9.0, 0.0))
         w.setIntent(b, LocomotionIntent.velocity(-9.0, 0.0)) // reversal: hard braking beyond traction
         w.step()
-        assertEquals(1, w.slipCount)
-        assertEquals(b, w.slipBody(0))
-        val excess = w.slipExcess(0)
-        assertTrue(excess > 0.0)
+        val s = slips(w)
+        assertEquals(1, s.size)
+        assertEquals(b.value, s[0].a)
+        assertEquals(w.tick, s[0].tick)
+        assertTrue(s[0].value > 0.0)
         w.setIntent(b, LocomotionIntent())
         w.step()
-        assertEquals(0, w.slipCount)
-        assertFailsWith<IllegalArgumentException> { w.slipBody(0) }
+        assertEquals(0, slips(w).size)
     }
 
     @Test fun slipExcessIsRequestedMinusAllowed() {
@@ -160,8 +162,9 @@ class LocomotionTest {
         val p = runner(w, vx = 9.0, ap = ap)
         w.setIntent(p, LocomotionIntent.velocity(0.0, 0.0))
         w.step()
-        assertEquals(1, w.slipCount)
-        assertEquals(12.0 - 0.9 * 9.81, w.slipExcess(0), 1e-9)
+        val s = slips(w)
+        assertEquals(1, s.size)
+        assertEquals(12.0 - 0.9 * 9.81, s[0].value, 1e-9)
         assertEquals(9.0 - 0.9 * 9.81 * dt, speed(w, p), 1e-9)
     }
 

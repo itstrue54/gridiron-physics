@@ -63,6 +63,16 @@ internal class Body(
     /** The material the body was created with; Upright and Diving use it, Down uses DOWNED_PLAYER. */
     @JvmField var baseMaterial = 0
 
+    /** Velocity after forces, before the contact solver: "before impact" for hit events. */
+    @JvmField var preVx = 0.0
+    @JvmField var preVy = 0.0
+
+    /** Bit per FieldLine the shape overlapped at the end of the last step. */
+    @JvmField var lineMask = 0
+
+    /** True once the shape touched a sideline or end line; false again when it is fully in bounds. */
+    @JvmField var outOfBounds = false
+
     /** Set by World.setAthlete; null for bodies without locomotion. */
     @JvmField var loco: LocomotionController? = null
 

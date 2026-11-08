@@ -49,6 +49,14 @@ class MathTest {
      * allocates on JDK 17+ desktop runtimes. Pure IEEE arithmetic plus StrictMath keeps the results bit-identical on
      * every platform; they may differ from StrictMath.sin(x) itself by at most 1 ulp.
      */
+    @Test fun wrapPiMapsAnglesIntoMinusPiExclusivePiInclusive() {
+        assertEquals(DMath.PI, DMath.wrapPi(-DMath.PI))
+        assertEquals(DMath.PI, DMath.wrapPi(DMath.PI))
+        assertEquals(0.5, DMath.wrapPi(0.5))
+        assertEquals(DMath.PI / 2, DMath.wrapPi(-1.5 * DMath.PI), 1e-12)
+        assertEquals(-DMath.PI / 2, DMath.wrapPi(3.5 * DMath.PI), 1e-12)
+    }
+
     @Test fun dMathSinCosMatchStrictMathWithin1UlpAndNeverAllocate() {
         val rng = SplitMix64(9L)
         val xs = DoubleArray(20000) { i ->
