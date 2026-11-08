@@ -13,6 +13,13 @@ data class WorldConfig(
     val sleepSpeed: Double = 0.05,
     val gravity: Double = 9.81,
     val hashEveryTick: Boolean = false,
+    /** Closing speed (m/s) above which restitution applies, so players in contact don't jitter. */
+    val restitutionThreshold: Double = 1.0,
+    val materials: MaterialTable = MaterialTable.DEFAULT,
+    /** Static walls at the edge of the runoff that stop bodies leaving the world. */
+    val runoffWalls: Boolean = true,
+    /** Contact pool size. Pairs beyond it are dropped (in id order) for that tick. */
+    val maxContacts: Int = 512,
 ) {
     init {
         require(maxBodies > 0) { "maxBodies must be > 0" }
@@ -20,6 +27,7 @@ data class WorldConfig(
         require(velocityIterations > 0) { "velocityIterations must be > 0" }
         require(relaxIterations >= 0) { "relaxIterations must be >= 0" }
         require(contactHertz > 0.0 && contactDampingRatio >= 0.0 && maxPushoutSpeed >= 0.0) { "bad contact softness" }
+        require(restitutionThreshold >= 0.0 && maxContacts > 0) { "bad restitutionThreshold/maxContacts" }
         require(sleepTimeS >= 0.0 && sleepSpeed >= 0.0 && gravity >= 0.0) { "bad sleep/gravity" }
     }
 

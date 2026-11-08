@@ -3,7 +3,9 @@ package io.github.itstrue54.gridironphysics.scenarios
 import io.github.itstrue54.gridironphysics.BodyDef
 import io.github.itstrue54.gridironphysics.BodyId
 import io.github.itstrue54.gridironphysics.BodyType
+import io.github.itstrue54.gridironphysics.Category
 import io.github.itstrue54.gridironphysics.FieldConfig
+import io.github.itstrue54.gridironphysics.Material
 import io.github.itstrue54.gridironphysics.ShapeDef
 import io.github.itstrue54.gridironphysics.World
 import io.github.itstrue54.gridironphysics.WorldConfig
@@ -63,14 +65,24 @@ class ScenarioBuilder(val world: World, val rng: SplitMix64) {
             x = x, y = y, vx = vx, vy = vy, mass = mass, linearDamping = damping, angularDamping = damping,
             angle = if (tag == Tags.AWAY) DMath.PI else 0.0,
             shape = ShapeDef.Circle(radius), userData = tag,
+            categoryBits = if (tag == Tags.AWAY) Category.AWAY else Category.HOME,
         ),
     )
 
+    /** Any body, for setups the helpers above don't cover. */
+    fun body(def: BodyDef): BodyId = world.createBody(def)
+
     fun official(x: Double, y: Double, vx: Double, vy: Double): BodyId = world.createBody(
-        BodyDef(type = BodyType.Kinematic, x = x, y = y, vx = vx, vy = vy, shape = ShapeDef.Circle(0.30), userData = Tags.OFFICIAL),
+        BodyDef(
+            type = BodyType.Kinematic, x = x, y = y, vx = vx, vy = vy, shape = ShapeDef.Circle(0.30),
+            userData = Tags.OFFICIAL, categoryBits = Category.OFFICIAL,
+        ),
     )
 
     fun prop(x: Double, y: Double, radius: Double): BodyId = world.createBody(
-        BodyDef(type = BodyType.Static, x = x, y = y, shape = ShapeDef.Circle(radius), userData = Tags.PROP),
+        BodyDef(
+            type = BodyType.Static, x = x, y = y, shape = ShapeDef.Circle(radius), userData = Tags.PROP,
+            categoryBits = Category.STATIC, material = Material.STRUCTURE,
+        ),
     )
 }

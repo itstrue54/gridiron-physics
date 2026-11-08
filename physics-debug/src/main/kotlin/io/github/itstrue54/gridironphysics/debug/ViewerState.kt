@@ -6,7 +6,7 @@ import io.github.itstrue54.gridironphysics.scenarios.Scenario
 import io.github.itstrue54.gridironphysics.scenarios.Scenarios
 
 /** Plain (non-Compose) viewer state, so it can be unit-tested. The UI redraws after every frame. */
-class ViewerState(scenario: Scenario = Scenarios.drift) {
+class ViewerState(scenario: Scenario = Scenarios.all.first()) {
     var scenario: Scenario = scenario
         set(value) { field = value; reset() }
 

@@ -18,6 +18,12 @@ class BodyDef(
     var shape: ShapeDef = ShapeDef.Circle(0.34),
     var userData: Int = 0,
     var bullet: Boolean = false,
+    /** 16-bit [Category] bits this body belongs to. */
+    var categoryBits: Int = Category.HOME,
+    /** 16-bit [Category] bits this body collides with. */
+    var maskBits: Int = Category.ALL,
+    /** [Material] id used to look up friction and restitution in [WorldConfig.materials]. */
+    var material: Int = Material.PLAYER,
 ) {
     /** Copies every field of [other] into this def without allocating. Returns this. */
     fun copyFrom(other: BodyDef): BodyDef {
@@ -28,6 +34,7 @@ class BodyDef(
         linearDamping = other.linearDamping; angularDamping = other.angularDamping
         shape = other.shape // ShapeDef is immutable, so sharing it is safe
         userData = other.userData; bullet = other.bullet
+        categoryBits = other.categoryBits; maskBits = other.maskBits; material = other.material
         return this
     }
 
@@ -37,8 +44,10 @@ class BodyDef(
         require(linearDamping.isFinite() && linearDamping >= 0.0) { "linearDamping must be finite and >= 0: $linearDamping" }
         require(angularDamping.isFinite() && angularDamping >= 0.0) { "angularDamping must be finite and >= 0: $angularDamping" }
         if (type == BodyType.Dynamic) require(mass.isFinite() && mass > 0.0) { "Dynamic body mass must be finite and > 0: $mass" }
-        when (val s = shape) {
-            is ShapeDef.Circle -> require(s.radius.isFinite() && s.radius > 0.0) { "Circle radius must be finite and > 0: ${s.radius}" }
-        }
+        // Shapes validate themselves on construction.
+        if (shape is ShapeDef.Segment) require(type == BodyType.Static) { "Segment shapes are for static bodies only" }
+        require(categoryBits in 0..Category.ALL) { "categoryBits must fit in 16 bits: $categoryBits" }
+        require(maskBits in 0..Category.ALL) { "maskBits must fit in 16 bits: $maskBits" }
+        require(material in 0 until MaterialTable.SIZE) { "material must be in 0..${MaterialTable.SIZE - 1}: $material" }
     }
 }

@@ -92,7 +92,9 @@ fun ViewerApp() {
                 val t = ViewTransform(state.world.field, size.width, size.height)
                 if (transform?.canvasW != size.width || transform?.canvasH != size.height) transform = t
                 drawField(t, textMeasurer)
+                drawRunoffWalls(t, state.world.config.runoffWalls)
                 drawBodies(t, state)
+                drawContacts(t, state, textMeasurer)
             }
             InspectPanel(state, frameNo)
         }
@@ -139,6 +141,7 @@ private fun InspectPanel(state: ViewerState, frameNo: Long) {
     ) {
         @Suppress("UNUSED_EXPRESSION") frameNo
         Text("stateHash ${java.lang.Long.toHexString(state.world.stateHash())}", fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+        Text("contacts ${state.world.contactCount}", fontFamily = FontFamily.Monospace, fontSize = 12.sp)
         Spacer(Modifier.width(1.dp).padding(4.dp))
         val id = state.selected
         if (id == null) {
@@ -162,6 +165,10 @@ private fun InspectPanel(state: ViewerState, frameNo: Long) {
             "linearDamping" to f(b.linearDamping), "angularDamping" to f(b.angularDamping),
             "radius" to f(b.radius),
             "bullet" to b.bullet.toString(), "awake" to b.awake.toString(),
+            "categoryBits" to "0x" + Integer.toHexString(b.categoryBits),
+            "maskBits" to "0x" + Integer.toHexString(b.maskBits),
+            "material" to b.material.toString(),
+            "sensor" to b.shape.sensor.toString(),
         )
         rows.forEach { (k, v) ->
             Row(Modifier.fillMaxWidth()) {
