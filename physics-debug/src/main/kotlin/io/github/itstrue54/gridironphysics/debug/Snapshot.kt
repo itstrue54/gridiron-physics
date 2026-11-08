@@ -22,7 +22,9 @@ fun main(args: Array<String>) {
     val seconds = args.getOrElse(1) { "1.5" }.toDouble()
     val scenario = args.getOrNull(2)?.let { name -> Scenarios.all.first { it.name == name } } ?: Scenarios.all.first()
     val colliders = args.getOrNull(3) == "true"
-    ImageComposeScene(width = 1500, height = 860).use { scene ->
+    val width = args.getOrNull(4)?.toInt() ?: 1500
+    val height = args.getOrNull(5)?.toInt() ?: 860
+    ImageComposeScene(width = width, height = height).use { scene ->
         scene.setContent {
             MaterialTheme(colorScheme = darkColorScheme()) { Surface(Modifier.fillMaxSize()) { ViewerApp(scenario, colliders) } }
         }

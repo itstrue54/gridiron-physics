@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
@@ -42,10 +43,12 @@ import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Window
+import androidx.compose.ui.window.WindowPlacement
 import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
@@ -57,7 +60,7 @@ fun main() = application {
     Window(
         onCloseRequest = ::exitApplication,
         title = "gridiron-physics viewer",
-        state = rememberWindowState(width = 1500.dp, height = 860.dp, position = WindowPosition(Alignment.Center)),
+        state = rememberWindowState(placement = WindowPlacement.Maximized, width = 1500.dp, height = 860.dp, position = WindowPosition(Alignment.Center)),
         alwaysOnTop = onTop,
     ) {
         MaterialTheme(colorScheme = darkColorScheme()) {
@@ -131,8 +134,11 @@ fun ViewerApp(initial: Scenario = Scenarios.all.first(), showColliders: Boolean 
 @Composable
 private fun TopBar(state: ViewerState, frameNo: Long, onTopChanged: (Boolean) -> Unit, changed: () -> Unit) {
     var menuOpen by remember { mutableStateOf(false) }
+    // Two fixed-height lines: controls (scroll sideways if the window is narrow), then status. Nothing may wrap,
+    // or the bar grows taller than the window and pushes the field off screen.
+    Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
     Row(
-        Modifier.fillMaxWidth().padding(8.dp),
+        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
@@ -162,10 +168,18 @@ private fun TopBar(state: ViewerState, frameNo: Long, onTopChanged: (Boolean) ->
             onClick = { state.alwaysOnTop = !state.alwaysOnTop; onTopChanged(state.alwaysOnTop); changed() },
             label = { Text("On top") },
         )
+    }
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            "tick ${state.world.tick}   t = ${"%.2f".format(state.world.tick / 60.0)} s",
+            fontFamily = FontFamily.Monospace, fontSize = 13.sp, maxLines = 1, softWrap = false,
+        )
         Spacer(Modifier.width(16.dp))
-        Text("tick ${state.world.tick}   t = ${"%.2f".format(state.world.tick / 60.0)} s   (frame $frameNo)", fontFamily = FontFamily.Monospace)
-        Spacer(Modifier.weight(1f))
-        Text(state.scenario.description + "   (wheel: zoom, drag: pan)", fontSize = 12.sp)
+        Text(
+            state.scenario.description + "   (wheel: zoom, drag: pan)",
+            Modifier.weight(1f), fontSize = 12.sp, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis,
+        )
+    }
     }
 }
 
