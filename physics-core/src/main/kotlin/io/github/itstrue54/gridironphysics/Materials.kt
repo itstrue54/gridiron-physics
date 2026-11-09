@@ -52,6 +52,16 @@ class MaterialTable private constructor(private val mu: DoubleArray, private val
     companion object {
         const val SIZE = 8
 
+        /** A table from raw row-major [friction] and [restitution] arrays (snapshots and replays), validated like [with]. */
+        internal fun fromRaw(friction: DoubleArray, restitution: DoubleArray): MaterialTable {
+            require(friction.size == SIZE * SIZE && restitution.size == SIZE * SIZE) { "material table must be $SIZE x $SIZE" }
+            for (i in 0 until SIZE * SIZE) {
+                require(friction[i].isFinite() && friction[i] >= 0.0) { "friction must be finite and >= 0: ${friction[i]}" }
+                require(restitution[i].isFinite() && restitution[i] in 0.0..1.0) { "restitution must be in 0..1: ${restitution[i]}" }
+            }
+            return MaterialTable(friction, restitution)
+        }
+
         /** The spec's starting values. Tunable, not measured. */
         val DEFAULT: MaterialTable = MaterialTable(DoubleArray(SIZE * SIZE) { 0.5 }, DoubleArray(SIZE * SIZE))
             .with(Material.PLAYER, Material.PLAYER, 0.6, 0.02)

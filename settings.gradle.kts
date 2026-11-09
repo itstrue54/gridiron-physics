@@ -20,3 +20,10 @@ rootProject.name = "gridiron-physics"
 include(":physics-core")
 include(":physics-scenarios")
 include(":physics-debug")
+
+// Android instrumented determinism tests: only where an Android SDK is installed (ANDROID_HOME, ANDROID_SDK_ROOT or
+// sdk.dir in local.properties), so the desktop modules build anywhere. CI's emulator job runs it.
+val localProperties = file("local.properties")
+val hasAndroidSdk = System.getenv("ANDROID_HOME") != null || System.getenv("ANDROID_SDK_ROOT") != null ||
+    (localProperties.exists() && localProperties.readText().contains("sdk.dir"))
+if (hasAndroidSdk) include(":physics-android-test")

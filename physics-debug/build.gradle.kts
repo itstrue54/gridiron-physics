@@ -27,6 +27,8 @@ tasks.test {
 compose.desktop {
     application {
         mainClass = "io.github.itstrue54.gridironphysics.debug.MainKt"
+        // ./gradlew :physics-debug:run -Preplay=path/to/play.gpr opens a replay.
+        (project.findProperty("replay") as String?)?.let { args(file(it).absolutePath) }
     }
 }
 
@@ -43,5 +45,6 @@ tasks.register<JavaExec>("snapshot") {
         (project.findProperty("colliders") as String?) ?: "false",
         (project.findProperty("width") as String?) ?: "1500",
         (project.findProperty("height") as String?) ?: "860",
+        (project.findProperty("replay") as String?) ?: "-1",
     )
 }

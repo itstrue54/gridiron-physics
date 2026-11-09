@@ -36,4 +36,10 @@ interface CommandRecorder {
     fun onDeflect(tick: Long, id: BodyId, impulseX: Double, impulseY: Double, impulseZ: Double)
     fun onSetWind(tick: Long, x: Double, y: Double)
     fun onSetReach(tick: Long, id: BodyId, reachRadius: Double, reachHeight: Double)
+
+    /**
+     * A step finished: [tick] is the new [World.tick] and [stateHash] its [World.stateHash]. Not a command; replays
+     * keep the hashes to check themselves. The world computes the hash only while a recorder is set.
+     */
+    fun onStep(tick: Long, stateHash: Long) {}
 }
