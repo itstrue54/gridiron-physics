@@ -73,8 +73,18 @@ object RandomPlays {
     const val S_DEFLECTS = 14
     const val S_STATS = 15
 
-    /** Plays play [index] from scratch. With [record], also returns its replay. */
-    fun play(index: Int, record: Boolean = false): Result = Play(index, record).run()
+    /**
+     * Runs one tick of a play. The default calls `world.step()`; the allocation test and the benchmarks wrap it to
+     * measure exactly the engine's step, not the game layer around it.
+     */
+    fun interface Stepper {
+        fun step(world: World)
+    }
+
+    private val DIRECT = Stepper { it.step() }
+
+    /** Plays play [index] from scratch. With [record], also returns its replay. [stepper] runs each tick. */
+    fun play(index: Int, record: Boolean = false, stepper: Stepper = DIRECT): Result = Play(index, record, stepper).run()
 
     /** FNV-1a over a play's hashes: one number per play for cross-device comparison. */
     fun digest(hashes: LongArray): Long {
@@ -83,7 +93,7 @@ object RandomPlays {
         return h
     }
 
-    private class Play(val index: Int, val record: Boolean) {
+    private class Play(val index: Int, val record: Boolean, val stepper: Stepper) {
         val seed = seedOf(index)
         val rng = SplitMix64(seed xor 0x5DEECE66DL)
         val field = if (rng.nextDouble() < 0.2) FieldConfig.COLLEGE else FieldConfig.PRO
@@ -124,7 +134,7 @@ object RandomPlays {
             for (t in 0 until ticks) {
                 if (recordFrom > 0 && t == recordFrom) recorder.start(w)
                 commands(t)
-                w.step()
+                stepper.step(w)
                 hashes[t] = w.stateHash()
                 readEvents()
             }

@@ -24,6 +24,9 @@ jobs:
       - name: Build and test
         shell: bash
         run: ./gradlew build --stacktrace
+      - name: Ticks per second (report)
+        shell: bash
+        run: ./gradlew :physics-bench:ticksPerSecond --stacktrace
       - name: Upload test reports
         if: failure()
         uses: actions/upload-artifact@v4
@@ -58,7 +61,10 @@ jobs:
           target: google_apis
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: ./gradlew :physics-android-test:connectedDebugAndroidTest --stacktrace
+          # The second line prints the step time on ART (the emulator is not a phone, so it is a report, not the gate).
+          script: |
+            ./gradlew :physics-android-test:connectedDebugAndroidTest --stacktrace
+            adb logcat -d -s GridironBench:I
       - name: Upload instrumented test reports
         if: always()
         uses: actions/upload-artifact@v4
