@@ -44,3 +44,18 @@ tasks.test {
     // The determinism harness plays 1,000 plays several times.
     maxHeapSize = "1g"
 }
+
+// The allocation gate again with escape analysis off. HotSpot's escape analysis can hide a temporary object (a boxed
+// value, an iterator, a lambda) that Android's runtime would really allocate, so step() must allocate nothing even
+// without it.
+val allocationTestNoEscapeAnalysis by tasks.registering(Test::class) {
+    group = "verification"
+    description = "Runs StepAllocationTest with -XX:-DoEscapeAnalysis."
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    useJUnitPlatform()
+    filter { includeTestsMatching("*.StepAllocationTest") }
+    jvmArgs("-XX:-DoEscapeAnalysis")
+    maxHeapSize = "1g"
+}
+tasks.check { dependsOn(allocationTestNoEscapeAnalysis) }

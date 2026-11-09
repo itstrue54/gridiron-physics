@@ -20,6 +20,7 @@ rootProject.name = "gridiron-physics"
 include(":physics-core")
 include(":physics-scenarios")
 include(":physics-debug")
+include(":physics-bench")
 
 // Android instrumented determinism tests: only where an Android SDK is installed (ANDROID_HOME, ANDROID_SDK_ROOT or
 // sdk.dir in local.properties), so the desktop modules build anywhere. CI's emulator job runs it.

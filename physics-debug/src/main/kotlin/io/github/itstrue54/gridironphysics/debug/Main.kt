@@ -197,7 +197,7 @@ private fun TopBar(state: ViewerState, frameNo: Long, onTopChanged: (Boolean) ->
     }
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(
-            "tick ${state.world.tick}   t = ${"%.2f".format(state.world.tick / 60.0)} s",
+            "tick ${state.world.tick}   t = ${"%.2f".format(state.world.tick / 60.0)} s   step ${"%.0f".format(state.stepMicros)} µs",
             fontFamily = FontFamily.Monospace, fontSize = 13.sp, maxLines = 1, softWrap = false,
         )
         Spacer(Modifier.width(16.dp))

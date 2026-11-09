@@ -355,7 +355,48 @@ object Scenarios {
         prop(x = field.homeGoalLineX, y = field.widthM / 2, radius = 0.5)
     }
 
-    val all: List<Scenario> = listOf(deepPass, punt, fieldGoal, tackleWithGrapple, doubleTeam, headOnTackle, sidelineRun, eventLab, contactLab, drift)
+    /**
+     * M8: the benchmark world, 25 dynamic players on locomotion. Five offensive linemen block five rushers who drive at
+     * the quarterback; four receivers run routes with defensive backs on them, two backs swing out against three
+     * linebackers and a safety, and the quarterback throws deep at the snap. The pass lands, bounces and rolls loose
+     * through traffic. physics-bench steps this world; the viewer shows it at 4x.
+     */
+    val scrimmage = scenario(
+        name = "25-player scrimmage (benchmark)",
+        description = "Benchmark world: 25 players, five blocks, routes, a deep pass that bounces loose through traffic (M8)",
+        seed = 31L,
+    ) {
+        val los = field.midfieldX
+        val cy = field.widthM / 2
+        val line = AthleteParams(maxSpeed = 6.8, maxAccel = 5.0, maxDecel = 7.0, turnRateAtRest = 8.0, turnRateAtMax = 2.5)
+        val skill = AthleteParams(maxSpeed = 9.0, maxAccel = 8.0, maxDecel = 8.5, turnRateAtRest = 12.0, turnRateAtMax = 2.5)
+        val back = AthleteParams(maxSpeed = 8.2, maxAccel = 7.0, maxDecel = 8.0, turnRateAtRest = 10.0, turnRateAtMax = 2.5)
+        val qb = athlete(los - 6.0, cy, 100.0, 0.34, Tags.HOME, skill, LocomotionIntent.velocity(-1.0, 0.0, 0.4))
+        for (k in 0 until 5) {
+            val y = cy + (k - 2) * 1.5
+            val o = athlete(los - 0.75, y, 140.0 + 3 * k, 0.37, Tags.HOME, line, LocomotionIntent.point(los - 2.0, y, 0.6))
+            val d = athlete(los + 0.75, y + 0.2, 130.0 + 4 * k, 0.36, Tags.AWAY, line, LocomotionIntent.point(los - 6.0, cy, 1.0))
+            world.createBlock(o, d, BlockDef(blockerPushForce = 1200.0, defenderPushForce = 1100.0 + 60 * k, shedThreshold = 1800.0 + 400 * k, driveSpeed = 2.0))
+        }
+        val wideY = doubleArrayOf(3.0, 9.0, field.widthM - 9.0, field.widthM - 3.0)
+        for (k in 0 until 4) {
+            val vy = if (k < 2) 0.8 else -0.8
+            athlete(los - 0.5, wideY[k], 88.0, 0.32, Tags.HOME, skill, LocomotionIntent.velocity(8.8, vy * (k % 2)))
+            athlete(los + 5.0, wideY[k] + 0.4, 86.0, 0.32, Tags.AWAY, skill, LocomotionIntent.velocity(8.6, vy * (k % 2)))
+        }
+        athlete(los - 5.0, cy - 1.5, 98.0, 0.34, Tags.HOME, back, LocomotionIntent.velocity(3.0, -6.0))
+        athlete(los - 5.0, cy + 1.5, 100.0, 0.34, Tags.HOME, back, LocomotionIntent.velocity(3.0, 6.0))
+        for (k in 0 until 3) athlete(los + 5.0, cy + (k - 1) * 5.0, 108.0, 0.35, Tags.AWAY, back, LocomotionIntent.point(los - 3.0, cy + (k - 1) * 9.0))
+        athlete(los + 16.0, cy, 92.0, 0.33, Tags.AWAY, skill, LocomotionIntent.point(los + 30.0, wideY[1]))
+        // The deep ball, thrown at the snap toward the second receiver's route.
+        val q = world.body(qb)
+        val from = Vec3(q.x + 0.3, q.y, 1.9)
+        val v = Vec3()
+        world.launchVelocityFor(from, Vec3(los + 30.0, wideY[1] + 2.0, 1.2), 11.0, FlightMode.Spiral, v)
+        world.launchBall(from, v, FlightMode.Spiral)
+    }
+
+    val all: List<Scenario> = listOf(scrimmage, deepPass, punt, fieldGoal, tackleWithGrapple, doubleTeam, headOnTackle, sidelineRun, eventLab, contactLab, drift)
 
     /** Angular damping for coasting bodies (no locomotion holds their heading). */
     private const val SPIN_DAMPING = 8.0

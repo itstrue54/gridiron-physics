@@ -124,6 +124,28 @@ class ViewerState(scenario: Scenario = Scenarios.all.first()) {
         selected = null
         alpha = 0.0
         follow = true
+        stepMicros = 0.0
+        ticksPerFrame = 0
+    }
+
+    // ---------------------------------------------------------------- step cost
+
+    /**
+     * Wall time per tick of the frames' simulation, smoothed over about a second (0 until the first tick). For a
+     * replay it includes the player re-issuing the recorded commands. Wall clock: a view statistic, never fed back.
+     */
+    var stepMicros: Double = 0.0
+        private set
+
+    /** Ticks the last frame advanced (4 at 4x and 60 Hz). */
+    var ticksPerFrame: Int = 0
+        private set
+
+    private fun timed(ticks: Int, nanos: Long) {
+        ticksPerFrame = ticks
+        if (ticks == 0) return
+        val us = nanos / 1e3 / ticks
+        stepMicros = if (stepMicros == 0.0) us else stepMicros + (us - stepMicros) * STEP_SMOOTHING
     }
 
     // ---------------------------------------------------------------- camera
@@ -198,6 +220,9 @@ class ViewerState(scenario: Scenario = Scenarios.all.first()) {
         /** Extra room around the ball in the follow window (m), so its lifted drawing and label stay on screen. */
         const val BALL_PAD_M = 3.0
 
+        /** Weight of each frame in [stepMicros]'s moving average (about one second at 60 Hz). */
+        const val STEP_SMOOTHING = 1.0 / 60
+
         /** Points kept in the ball trail (8 s). */
         const val TRAIL_SIZE = 480
 
@@ -224,8 +249,11 @@ class ViewerState(scenario: Scenario = Scenarios.all.first()) {
     fun frame(frameSeconds: Double) {
         if (paused) return
         val p = player
+        val tick0 = world.tick
+        val t0 = System.nanoTime()
         if (p == null) {
             alpha = world.advance(frameSeconds * speed)
+            timed((world.tick - tick0).toInt(), System.nanoTime() - t0)
         } else {
             // A replay steps through its player (which makes the recorded commands), at most 4 ticks a frame like advance().
             val dt = WorldConfig.DT
@@ -237,6 +265,7 @@ class ViewerState(scenario: Scenario = Scenarios.all.first()) {
                 if (pauseAtDivergence()) { replayAccumulator = 0.0; break }
             }
             alpha = replayAccumulator / dt
+            timed((world.tick - tick0).toInt(), System.nanoTime() - t0) // includes event collection; replays only
             if (p.finished) paused = true
         }
         collectEvents()
