@@ -6,6 +6,9 @@ import io.github.itstrue54.gridironphysics.internal.Flight
 import io.github.itstrue54.gridironphysics.internal.FlightPoint
 import io.github.itstrue54.gridironphysics.internal.GoalPosts
 import io.github.itstrue54.gridironphysics.internal.BroadPhase
+import io.github.itstrue54.gridironphysics.internal.ByteSink
+import io.github.itstrue54.gridironphysics.internal.ByteSource
+import io.github.itstrue54.gridironphysics.internal.Codec
 import io.github.itstrue54.gridironphysics.internal.BruteForceBroadPhase
 import io.github.itstrue54.gridironphysics.internal.Collide
 import io.github.itstrue54.gridironphysics.internal.Contact
@@ -25,7 +28,7 @@ import io.github.itstrue54.gridironphysics.math.Vec3
  * The simulation. Advances in fixed 1/60 s ticks; the same seed and the same calls produce the same
  * state on every device. Not thread-safe: call it from one thread.
  */
-class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
+class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
 
     /** Optional hook that sees every state-changing call (for replays). */
     var recorder: CommandRecorder? = null
@@ -1617,7 +1620,12 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
     private fun bookkeeping() {
         updateSleep()
         tick++
-        if (config.hashEveryTick) lastTickHash = stateHash()
+        val rec = recorder
+        if (config.hashEveryTick || rec != null) {
+            val h = stateHash()
+            if (config.hashEveryTick) lastTickHash = h
+            rec?.onStep(tick, h)
+        }
     }
 
     // ---------------------------------------------------------------- sleeping
@@ -1730,6 +1738,280 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
         return h
     }
 
+    // ---------------------------------------------------------------- snapshot and restore
+
+    // The layout below is WorldSnapshot.VERSION 1. Every field of Body, Joint, Contact, BallRecord and the
+    // locomotion controller is written, scratch included, so a restored world is the same object graph bit for bit
+    // (SnapshotTest checks that a restored world snapshots to the same bytes, and that the field lists still match).
+
+    private var fingerprint = 0L
+    private var fingerprintSet = false
+
+    /** FNV-1a of the encoded config and field: a snapshot only fits a world with the same settings. */
+    private fun configFingerprint(): Long {
+        if (!fingerprintSet) {
+            val s = ByteSink(2048)
+            Codec.config(s, config); Codec.field(s, field)
+            fingerprint = WorldSnapshot.checksum(s.buf, s.size)
+            fingerprintSet = true
+        }
+        return fingerprint
+    }
+
+    /**
+     * The whole simulation state as a [WorldSnapshot] (see there for what it holds). Allocates: call it between steps,
+     * not every tick. The [recorder], [config] and [field] are not part of it.
+     */
+    fun snapshot(): WorldSnapshot {
+        val s = ByteSink(8192)
+        s.i32(WorldSnapshot.MAGIC); s.i32(WorldSnapshot.VERSION)
+        s.i64(configFingerprint()); s.i64(tick); s.i64(stateHash())
+        s.i64(rng.state); s.f64(accumulator); s.f64(alpha); s.i64(lastTickHash)
+        Codec.surface(s, surface); s.f64(flight.windX); s.f64(flight.windY)
+        s.i32(attackDirection); s.f64(forwardProgressX); s.i32(carrier?.id ?: -1)
+
+        s.i32(liveCount); s.i32(highWater)
+        for (i in 0..config.maxBodies) s.i32(generations[i])
+        for (i in 0 until config.maxBodies) {
+            val b = bodies[i]
+            s.bool(b != null)
+            if (b != null) writeBody(s, b)
+        }
+        s.bool(bodies[ballSlot] != null)
+        writeBody(s, ballBody)
+
+        s.i32(jointLive); s.i32(jointHighWater)
+        for (k in 0 until config.maxJoints) s.i32(jointGenerations[k])
+        for (k in 0 until config.maxJoints) {
+            val j = joints[k]
+            s.bool(j != null)
+            if (j != null) writeJoint(s, j)
+        }
+
+        s.i32(contactCount)
+        for (i in 0 until contactCount) writeContact(s, contacts[i])
+        s.i32(touchCount)
+        for (i in 0 until touchCount) { s.i64(touchKey[i]); s.i32(touchA[i]); s.i32(touchB[i]); s.bool(touchSensor[i]) }
+        eventReader.writeTo(s)
+
+        val r = ball
+        s.f64(r.x); s.f64(r.y); s.f64(r.z); s.f64(r.vx); s.f64(r.vy); s.f64(r.vz)
+        s.f64(r.prevX); s.f64(r.prevY); s.f64(r.prevZ); s.u8(r.mode); s.u8(r.flightMode)
+
+        s.i64(WorldSnapshot.checksum(s.buf, s.size))
+        return WorldSnapshot(s.toByteArray())
+    }
+
+    /**
+     * Puts this world in the state [s] was taken in, tick and rng included; stepping on gives the same hashes and events
+     * as the original did. The world must have the same [WorldConfig] and [FieldConfig] (the seed may differ); otherwise
+     * throws [IllegalArgumentException] and changes nothing. The event being read ([EventReader.next]) is dropped: read
+     * on with next(). Not a command: a [recorder] does not see it, so restart a [ReplayRecorder] after restoring.
+     */
+    fun restore(s: WorldSnapshot) {
+        val bytes = s.bytes
+        val r = ByteSource(bytes, WorldSnapshot.FINGERPRINT_OFFSET, bytes.size - 8)
+        require(r.i64() == configFingerprint()) { "the snapshot is from a world with a different WorldConfig or FieldConfig" }
+        val t = r.i64()
+        val hash = r.i64()
+        tick = t
+        rng.state = r.i64(); accumulator = r.f64(); alpha = r.f64(); lastTickHash = r.i64()
+        surface = Codec.surface(r); flight.windX = r.f64(); flight.windY = r.f64()
+        attackDirection = r.i32(); forwardProgressX = r.f64()
+        val carrierId = r.i32()
+
+        liveCount = r.i32(); highWater = r.i32()
+        require(liveCount in 0..config.maxBodies && highWater in 0..config.maxBodies + 1) { "bad body counts" }
+        for (i in 0..config.maxBodies) generations[i] = r.i32()
+        for (i in 0 until config.maxBodies) bodies[i] = if (r.bool()) readBody(r, null) else null
+        val ballIn = r.bool()
+        readBody(r, ballBody)
+        bodies[ballSlot] = if (ballIn) ballBody else null
+        carrier = if (carrierId < 0) null else bodyFor(carrierId)
+
+        jointLive = r.i32(); jointHighWater = r.i32()
+        require(jointLive in 0..config.maxJoints && jointHighWater in 0..config.maxJoints) { "bad joint counts" }
+        for (k in 0 until config.maxJoints) jointGenerations[k] = r.i32()
+        for (k in 0 until config.maxJoints) joints[k] = if (r.bool()) readJoint(r) else null
+
+        val n = r.count(contacts.size, "contact")
+        for (i in 0 until n) readContact(r, contacts[i])
+        for (i in n until contacts.size) { contacts[i].a = null; contacts[i].b = null }
+        contactCount = n
+        for (c in oldContacts) { c.a = null; c.b = null }
+        oldContactCount = 0
+        pairCount = 0
+        val tn = r.count(touchCap, "touching pair")
+        for (i in 0 until tn) { touchKey[i] = r.i64(); touchA[i] = r.i32(); touchB[i] = r.i32(); touchSensor[i] = r.bool() }
+        touchCount = tn
+        eventReader.readFrom(r)
+
+        val br = ball
+        br.x = r.f64(); br.y = r.f64(); br.z = r.f64(); br.vx = r.f64(); br.vy = r.f64(); br.vz = r.f64()
+        br.prevX = r.f64(); br.prevY = r.f64(); br.prevZ = r.f64()
+        br.mode = r.u8(); br.flightMode = r.u8()
+        require(br.mode <= BallRecord.MODE_CARRIED && br.flightMode < FlightMode.entries.size) { "bad ball mode" }
+        r.expectEnd("world snapshot")
+
+        // World-space shapes are a pure function of shape and pose (refreshed at the end of every step), so rebuild them.
+        for (i in 0 until highWater) { val b = bodies[i] ?: continue; b.geom.set(b.shape, b.x, b.y, b.angle) }
+        ballBody.geom.set(ballBody.shape, ballBody.x, ballBody.y, ballBody.angle)
+        check(stateHash() == hash) { "restore did not reproduce the snapshot's state hash" }
+    }
+
+    /** The live body (or the loose ball) with this id; for decoding, so a bad id is a format error. */
+    private fun bodyFor(id: Int): Body {
+        val b = liveOrNull(id)
+        require(b != null) { "snapshot names body $id, which it does not hold" }
+        return b
+    }
+
+    private fun writeBody(s: ByteSink, b: Body) {
+        s.i32(b.id); s.u8(b.type.ordinal); Codec.shape(s, b.uprightShape)
+        val ly = b.lyingShape
+        s.bool(ly != null)
+        if (ly != null) Codec.shape(s, ly)
+        s.bool(b.shape !== b.uprightShape)
+        s.f64(b.x); s.f64(b.y); s.f64(b.prevX); s.f64(b.prevY); s.f64(b.angle)
+        s.f64(b.vx); s.f64(b.vy); s.f64(b.angularVelocity)
+        s.f64(b.mass); s.f64(b.invMass); s.f64(b.inertia); s.f64(b.invInertia)
+        s.f64(b.linearDamping); s.f64(b.angularDamping)
+        s.i32(b.userData); s.bool(b.bullet); s.bool(b.awake)
+        s.i32(b.categoryBits); s.i32(b.maskBits); s.i32(b.material)
+        s.f64(b.sleepTime); s.f64(b.extent); s.f64(b.x0); s.f64(b.y0); s.f64(b.angle0); s.f64(b.speedBound)
+        s.f64(b.fx); s.f64(b.fy); s.u8(b.stance.ordinal); s.i32(b.baseMaterial)
+        s.f64(b.preVx); s.f64(b.preVy); s.i32(b.lineMask); s.bool(b.outOfBounds)
+        s.f64(b.reachRadius); s.f64(b.reachHeight); s.bool(b.inCatch)
+        val c = b.loco
+        s.bool(c != null)
+        if (c != null) {
+            Codec.athlete(s, c.params)
+            val it = c.intent
+            s.u8(it.mode.ordinal); s.f64(it.targetX); s.f64(it.targetY); s.f64(it.effort)
+            s.u8(it.stance?.ordinal ?: NO_STANCE)
+            s.f64(c.slip); s.bool(c.wantsMotion)
+        }
+    }
+
+    /** A new body, or the fields of [into] (the loose-ball body, whose id, type and shape are fixed). */
+    private fun readBody(r: ByteSource, into: Body?): Body {
+        val id = r.i32()
+        val type = enumAt(BodyType.entries, r.u8(), "body type")
+        val up = Codec.shape(r)
+        val b = into ?: Body(id, type, up)
+        require(b.id == id && b.type == type) { "snapshot body $id does not match the engine's ball body" }
+        val ly = if (r.bool()) (Codec.shape(r) as? ShapeDef.Capsule ?: throw IllegalArgumentException("lying shape must be a capsule")) else null
+        b.lyingShape = ly
+        b.shape = if (r.bool()) (ly ?: throw IllegalArgumentException("body $id lies without a lying shape")) else b.uprightShape
+        b.x = r.f64(); b.y = r.f64(); b.prevX = r.f64(); b.prevY = r.f64(); b.angle = r.f64()
+        b.vx = r.f64(); b.vy = r.f64(); b.angularVelocity = r.f64()
+        b.mass = r.f64(); b.invMass = r.f64(); b.inertia = r.f64(); b.invInertia = r.f64()
+        b.linearDamping = r.f64(); b.angularDamping = r.f64()
+        b.userData = r.i32(); b.bullet = r.bool(); b.awake = r.bool()
+        b.categoryBits = r.i32(); b.maskBits = r.i32(); b.material = r.i32()
+        b.sleepTime = r.f64(); b.extent = r.f64(); b.x0 = r.f64(); b.y0 = r.f64(); b.angle0 = r.f64(); b.speedBound = r.f64()
+        b.fx = r.f64(); b.fy = r.f64(); b.stance = enumAt(Stance.entries, r.u8(), "stance"); b.baseMaterial = r.i32()
+        b.preVx = r.f64(); b.preVy = r.f64(); b.lineMask = r.i32(); b.outOfBounds = r.bool()
+        b.reachRadius = r.f64(); b.reachHeight = r.f64(); b.inCatch = r.bool()
+        if (r.bool()) {
+            val p = Codec.athlete(r)
+            val c = LocomotionController(p)
+            val mode = enumAt(LocomotionIntent.Mode.entries, r.u8(), "intent mode")
+            val tx = r.f64(); val ty = r.f64(); val effort = r.f64()
+            val st = r.u8()
+            c.intent.setRaw(mode, tx, ty, effort, if (st == NO_STANCE) null else enumAt(Stance.entries, st, "intent stance"))
+            c.slip = r.f64(); c.wantsMotion = r.bool()
+            b.loco = c
+        } else {
+            b.loco = null
+        }
+        return b
+    }
+
+    private fun writeJoint(s: ByteSink, j: Joint) {
+        s.i32(j.id); s.u8(j.type.ordinal); s.i32(j.a.id); s.i32(j.b.id); s.f64(j.restLength)
+        val soft = j.soft
+        s.bool(soft != null)
+        if (soft != null) { s.f64(soft.biasRate); s.f64(soft.massScale); s.f64(soft.impulseScale) }
+        s.f64(j.breakForce); s.f64(j.dragForce)
+        s.f64(j.pushForceA); s.f64(j.pushForceB); s.f64(j.shedThreshold); s.f64(j.driveSpeed); s.f64(j.pushA); s.f64(j.pushB)
+        s.f64(j.localX); s.f64(j.localY); s.f64(j.refAngle)
+        s.f64(j.axial); s.f64(j.lateral); s.f64(j.dragX); s.f64(j.dragY); s.f64(j.linX); s.f64(j.linY); s.f64(j.angular)
+        s.bool(j.solve); s.f64(j.ux); s.f64(j.uy); s.f64(j.len); s.f64(j.axialMass); s.f64(j.rAx); s.f64(j.rAy)
+        s.f64(j.k11); s.f64(j.k12); s.f64(j.k22); s.f64(j.angularMass); s.bool(j.broken)
+    }
+
+    private fun readJoint(r: ByteSource): Joint {
+        val id = r.i32()
+        val type = enumAt(JointType.entries, r.u8(), "joint type")
+        val a = bodyFor(r.i32()); val b = bodyFor(r.i32())
+        val rest = r.f64()
+        val soft = if (r.bool()) { val br = r.f64(); val ms = r.f64(); Softness.raw(br, ms, r.f64()) } else null
+        val j = Joint(id, type, a, b, rest, soft)
+        j.breakForce = r.f64(); j.dragForce = r.f64()
+        j.pushForceA = r.f64(); j.pushForceB = r.f64(); j.shedThreshold = r.f64(); j.driveSpeed = r.f64(); j.pushA = r.f64(); j.pushB = r.f64()
+        j.localX = r.f64(); j.localY = r.f64(); j.refAngle = r.f64()
+        j.axial = r.f64(); j.lateral = r.f64(); j.dragX = r.f64(); j.dragY = r.f64(); j.linX = r.f64(); j.linY = r.f64(); j.angular = r.f64()
+        j.solve = r.bool(); j.ux = r.f64(); j.uy = r.f64(); j.len = r.f64(); j.axialMass = r.f64(); j.rAx = r.f64(); j.rAy = r.f64()
+        j.k11 = r.f64(); j.k12 = r.f64(); j.k22 = r.f64(); j.angularMass = r.f64(); j.broken = r.bool()
+        return j
+    }
+
+    /** A contact side: a live body, a wall, the ball body, or (destroyed since the last step) a copy of the body. */
+    private fun writeRef(s: ByteSink, o: Body) {
+        when {
+            o.id < 0 -> { s.u8(REF_WALL); s.i32(-1 - o.id) }
+            o === ballBody -> s.u8(REF_BALL)
+            liveOrNull(o.id) === o -> { s.u8(REF_LIVE); s.i32(o.id) }
+            else -> { s.u8(REF_DETACHED); writeBody(s, o) }
+        }
+    }
+
+    private fun readRef(r: ByteSource): Body = when (val k = r.u8()) {
+        REF_WALL -> { val w = r.i32(); require(w in walls.indices) { "bad wall $w" }; walls[w] }
+        REF_BALL -> ballBody
+        REF_LIVE -> bodyFor(r.i32())
+        REF_DETACHED -> readBody(r, null).also { it.geom.set(it.shape, it.x, it.y, it.angle) }
+        else -> throw IllegalArgumentException("bad contact body kind $k")
+    }
+
+    private fun writeContact(s: ByteSink, c: Contact) {
+        writeRef(s, c.a!!); writeRef(s, c.b!!)
+        s.i64(c.key); s.i32(c.idA); s.i32(c.idB); s.i32(c.wall); s.bool(c.sensor)
+        s.f64(c.friction); s.f64(c.restitution); s.bool(c.solve)
+        val m = c.m
+        s.u8(m.count); s.f64(m.nx); s.f64(m.ny)
+        for (k in 0 until 2) { s.f64(m.px[k]); s.f64(m.py[k]); s.f64(m.sep[k]); s.i32(m.id[k]) }
+        s.i32(m.satEdge); s.f64(m.cpAx); s.f64(m.cpAy); s.f64(m.cpBx); s.f64(m.cpBy)
+        for (k in 0 until 2) {
+            s.f64(c.rAx[k]); s.f64(c.rAy[k]); s.f64(c.rBx[k]); s.f64(c.rBy[k])
+            s.f64(c.normalMass[k]); s.f64(c.tangentMass[k]); s.f64(c.normalImpulse[k]); s.f64(c.tangentImpulse[k])
+            s.f64(c.maxNormalImpulse[k]); s.f64(c.relativeVelocity[k])
+        }
+    }
+
+    private fun readContact(r: ByteSource, c: Contact) {
+        c.a = readRef(r); c.b = readRef(r)
+        c.key = r.i64(); c.idA = r.i32(); c.idB = r.i32(); c.wall = r.i32(); c.sensor = r.bool()
+        c.friction = r.f64(); c.restitution = r.f64(); c.solve = r.bool()
+        val m = c.m
+        m.count = r.u8()
+        require(m.count in 1..2) { "bad manifold point count ${m.count}" }
+        m.nx = r.f64(); m.ny = r.f64()
+        for (k in 0 until 2) { m.px[k] = r.f64(); m.py[k] = r.f64(); m.sep[k] = r.f64(); m.id[k] = r.i32() }
+        m.satEdge = r.i32(); m.cpAx = r.f64(); m.cpAy = r.f64(); m.cpBx = r.f64(); m.cpBy = r.f64()
+        for (k in 0 until 2) {
+            c.rAx[k] = r.f64(); c.rAy[k] = r.f64(); c.rBx[k] = r.f64(); c.rBy[k] = r.f64()
+            c.normalMass[k] = r.f64(); c.tangentMass[k] = r.f64(); c.normalImpulse[k] = r.f64(); c.tangentImpulse[k] = r.f64()
+            c.maxNormalImpulse[k] = r.f64(); c.relativeVelocity[k] = r.f64()
+        }
+    }
+
+    private fun <T> enumAt(values: List<T>, i: Int, what: String): T {
+        require(i < values.size) { "bad $what $i" }
+        return values[i]
+    }
+
     /** The engine's own statics, indexed by [ContactView] wall number: four runoff walls, then the two post bases. */
     private fun makeWalls(): Array<Body> {
         val f = field
@@ -1781,6 +2063,13 @@ class World(val config: WorldConfig, val field: FieldConfig, seed: Long) {
          * shell (I = ⅔mr²) starts to roll instead of slide, 1 / (1 + mr²/I) = 0.4.
          */
         const val ROLL_FRACTION = 0.4
+
+        // Snapshot encodings.
+        const val NO_STANCE = 255
+        const val REF_LIVE = 0
+        const val REF_WALL = 1
+        const val REF_BALL = 2
+        const val REF_DETACHED = 3
 
         /** Straight pieces the ball's tick may be split into by post hits and bounces. */
         const val MAX_FLIGHT_PASSES = 4

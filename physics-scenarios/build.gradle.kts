@@ -29,3 +29,18 @@ dependencies {
 tasks.test {
     useJUnitPlatform()
 }
+
+// Regenerates the cross-device golden data (digests of the 1,000 harness plays and a few .gpr replays).
+// Run only when engine behaviour is meant to change, then commit src/main/resources/golden.
+tasks.register<JavaExec>("generateGolden") {
+    group = "verification"
+    description = "Writes golden determinism digests and replays into src/main/resources/golden."
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("io.github.itstrue54.gridironphysics.scenarios.GenerateGolden")
+    args(layout.projectDirectory.dir("src/main/resources").asFile.path)
+}
+
+tasks.test {
+    // The determinism harness plays 1,000 plays several times.
+    maxHeapSize = "1g"
+}

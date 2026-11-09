@@ -1,5 +1,8 @@
 package io.github.itstrue54.gridironphysics
 
+import io.github.itstrue54.gridironphysics.internal.ByteSink
+import io.github.itstrue54.gridironphysics.internal.ByteSource
+
 /** Kinds of event in [World.events]. Which [EventReader] fields each kind sets is listed on the constant. */
 enum class EventType {
     /**
@@ -295,6 +298,33 @@ class EventReader internal constructor(capacity: Int) {
         val d = s * DOUBLES
         for (k in 0 until DOUBLES) doubles[d + k] = 0.0
         return s
+    }
+
+    /** The pending events, oldest first, and [lostCount] (snapshots). The event being read, if any, is not included. */
+    internal fun writeTo(s: ByteSink) {
+        s.i64(lostCount)
+        s.i32(size)
+        for (k in 0 until size) {
+            var e = head + k
+            if (e >= cap) e -= cap
+            s.u8(types[e]); s.i64(ticks[e])
+            for (i in 0 until INTS) s.i32(ints[e * INTS + i])
+            for (i in 0 until DOUBLES) s.f64(doubles[e * DOUBLES + i])
+        }
+    }
+
+    /** Replaces the contents with what [writeTo] wrote; nothing is current until [next]. */
+    internal fun readFrom(r: ByteSource) {
+        val lost = r.i64()
+        val n = r.count(cap, "event")
+        for (e in 0 until n) {
+            val t = r.u8()
+            require(t < TYPES.size) { "bad event type $t" }
+            types[e] = t; ticks[e] = r.i64()
+            for (i in 0 until INTS) ints[e * INTS + i] = r.i32()
+            for (i in 0 until DOUBLES) doubles[e * DOUBLES + i] = r.f64()
+        }
+        head = 0; size = n; cur = -1; lostCount = lost
     }
 
     internal fun setInt(s: Int, field: Int, v: Int) { ints[s * INTS + field] = v }

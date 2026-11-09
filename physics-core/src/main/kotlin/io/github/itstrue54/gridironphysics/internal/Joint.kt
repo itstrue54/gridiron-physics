@@ -23,6 +23,11 @@ internal class Softness private constructor(
 
         /** Fully rigid with no position bias: the relax pass of a rigid row. */
         val RIGID_RELAX = Softness(0.0, 1.0, 0.0)
+
+        /** Coefficients as computed before (snapshots); [RIGID_RELAX] itself when they match it. */
+        fun raw(biasRate: Double, massScale: Double, impulseScale: Double): Softness =
+            if (biasRate.toRawBits() == 0L && massScale == 1.0 && impulseScale.toRawBits() == 0L) RIGID_RELAX
+            else Softness(biasRate, massScale, impulseScale)
     }
 }
 

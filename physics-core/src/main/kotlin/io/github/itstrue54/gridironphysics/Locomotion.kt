@@ -95,6 +95,11 @@ class LocomotionIntent {
         return this
     }
 
+    /** Sets every field as is (snapshots and replays restore values that were valid when written). */
+    internal fun setRaw(mode: Mode, targetX: Double, targetY: Double, effort: Double, stance: Stance?) {
+        this.mode = mode; this.targetX = targetX; this.targetY = targetY; this.effort = effort; this.stance = stance
+    }
+
     internal fun validate() {
         require(targetX.isFinite() && targetY.isFinite()) { "intent target must be finite: ($targetX, $targetY)" }
         require(effort.isFinite() && effort in 0.0..1.0) { "effort must be in 0..1: $effort" }

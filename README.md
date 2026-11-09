@@ -16,10 +16,10 @@ play logic and rules. Same seed + same inputs = the same result on Android, Wind
 | Module | Contents | Ships in games? |
 |---|---|---|
 | `physics-core` | The engine (Kotlin stdlib + `StrictMath` only, Java 11 bytecode) | Yes |
-| `physics-scenarios` | Scenario scripts shared by tests and the viewer | No |
+| `physics-scenarios` | Scenario scripts, the 1,000-play determinism harness and its golden data, shared by tests and the viewer | No |
 | `physics-debug` | Compose Desktop debug viewer | No |
 | `physics-bench` | Benchmarks (M8) | No |
-| `physics-android-test` | Android instrumented determinism tests (M7) | No |
+| `physics-android-test` | Android instrumented determinism tests (built only where an Android SDK is installed) | No |
 
 ## Building
 
@@ -27,7 +27,18 @@ play logic and rules. Same seed + same inputs = the same result on Android, Wind
 ./gradlew build                  # everything
 ./gradlew :physics-core:test     # engine tests
 ./gradlew :physics-debug:run     # debug viewer
+./gradlew :physics-debug:run -Preplay=path/to/play.gpr          # open a replay in the viewer
+./gradlew :physics-android-test:connectedDebugAndroidTest        # determinism on a device or emulator
+./gradlew :physics-scenarios:generateGolden                      # regenerate golden digests (only when behaviour should change)
 ```
+
+## Snapshots and replays
+
+`World.snapshot()` captures the whole simulation state (bodies, joints, contacts with warm-start impulses, the ball,
+events, the rng) as bytes; `restore()` puts any world with the same `WorldConfig` and `FieldConfig` back in that state,
+and it steps on identically. A `ReplayRecorder` attached to a world records every command and every tick's
+`stateHash()` without allocating; `Replay.encode()` gives the `.gpr` bytes (little-endian, versioned) and
+`ReplayPlayer` replays them, reporting the first tick whose hash does not match. File I/O is the caller's job.
 
 ## Using it from a game
 

@@ -6,7 +6,10 @@ import io.github.itstrue54.gridironphysics.BodyType
 import io.github.itstrue54.gridironphysics.ContactView
 import io.github.itstrue54.gridironphysics.EventType
 import io.github.itstrue54.gridironphysics.FieldLine
+import io.github.itstrue54.gridironphysics.Replay
+import io.github.itstrue54.gridironphysics.ReplayPlayer
 import io.github.itstrue54.gridironphysics.World
+import io.github.itstrue54.gridironphysics.WorldConfig
 import io.github.itstrue54.gridironphysics.scenarios.Scenario
 import io.github.itstrue54.gridironphysics.scenarios.Scenarios
 
@@ -19,7 +22,43 @@ class EventMarker(val type: EventType, val tick: Long, val x: Double, val y: Dou
 /** Plain (non-Compose) viewer state, so it can be unit-tested. The UI redraws after every frame. */
 class ViewerState(scenario: Scenario = Scenarios.all.first()) {
     var scenario: Scenario = scenario
-        set(value) { field = value; reset() }
+        set(value) { field = value; replay = null; replayName = null; reset() }
+
+    /** The replay being played, or null when showing a scenario. Set with [loadReplay]. */
+    var replay: Replay? = null
+        private set
+
+    /** Where the replay came from (file or resource name). */
+    var replayName: String? = null
+        private set
+
+    /** Plays [replay]; its world is [world]. */
+    var player: ReplayPlayer? = null
+        private set
+
+    private var replayAccumulator = 0.0
+
+    /** Set once playback has paused at the first divergent tick, so Play then carries on past it. */
+    private var divergencePaused = false
+
+    /** Pauses the first time the replay diverges, so the flagged tick stays on screen. Returns true when it did. */
+    private fun pauseAtDivergence(): Boolean {
+        if (divergencePaused || divergentTick == null) return false
+        divergencePaused = true
+        paused = true
+        return true
+    }
+
+    /** Shows [r] instead of a scenario: its world, stepped through its recorded commands, checked against its hashes. */
+    fun loadReplay(r: Replay, name: String) {
+        replay = r
+        replayName = name
+        reset()
+    }
+
+    /** The first tick of the replay that did not match its recording, or null (none yet, or no replay). */
+    val divergentTick: Long?
+        get() = player?.divergentTick?.takeIf { it != ReplayPlayer.NO_DIVERGENCE }
 
     var world: World = scenario.build()
         private set
@@ -65,7 +104,17 @@ class ViewerState(scenario: Scenario = Scenarios.all.first()) {
     private var lastBallState = BallState.Dead
 
     fun reset() {
-        world = scenario.build()
+        val r = replay
+        if (r != null) {
+            val p = ReplayPlayer(r)
+            player = p
+            world = p.world
+        } else {
+            player = null
+            world = scenario.build()
+        }
+        replayAccumulator = 0.0
+        divergencePaused = false
         markerList.clear()
         logList.clear()
         lastSlip.clear()
@@ -160,7 +209,13 @@ class ViewerState(scenario: Scenario = Scenarios.all.first()) {
 
     /** Advances exactly one tick (used while paused). Drawn at the new position, not interpolated. */
     fun stepOnce() {
-        world.step()
+        val p = player
+        if (p != null) {
+            if (!p.stepOnce()) paused = true
+            pauseAtDivergence()
+        } else {
+            world.step()
+        }
         alpha = 1.0
         collectEvents()
     }
@@ -168,7 +223,22 @@ class ViewerState(scenario: Scenario = Scenarios.all.first()) {
     /** Called once per rendered frame with the real elapsed time. */
     fun frame(frameSeconds: Double) {
         if (paused) return
-        alpha = world.advance(frameSeconds * speed)
+        val p = player
+        if (p == null) {
+            alpha = world.advance(frameSeconds * speed)
+        } else {
+            // A replay steps through its player (which makes the recorded commands), at most 4 ticks a frame like advance().
+            val dt = WorldConfig.DT
+            replayAccumulator = minOf(replayAccumulator + frameSeconds * speed, 4 * dt)
+            while (replayAccumulator >= dt) {
+                replayAccumulator -= dt
+                if (!p.stepOnce()) { paused = true; replayAccumulator = 0.0; break }
+                collectEvents()
+                if (pauseAtDivergence()) { replayAccumulator = 0.0; break }
+            }
+            alpha = replayAccumulator / dt
+            if (p.finished) paused = true
+        }
         collectEvents()
     }
 
