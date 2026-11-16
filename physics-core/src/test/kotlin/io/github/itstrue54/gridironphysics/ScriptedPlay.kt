@@ -68,7 +68,7 @@ class ScriptedPlay(seed: Long = 42L, val config: WorldConfig = WorldConfig()) {
         w.setIntent(lb, intent.setPoint(42.0, 24.0, 0.9))
         w.setIntent(ol, intent.setVelocity(1.0, 0.0, 0.6))
         w.setIntent(dl, intent.setVelocity(-1.0, 0.0, 0.7))
-        w.setIntent(cb, intent.setVelocity(3.0, 6.0, 0.95))
+        w.setIntent(cb, intent.setVelocity(3.0, 6.0, 0.95).face(1.1)) // a facing (near his run, so the play is unchanged) for snapshots to carry
         w.setIntent(qb, intent.setVelocity(-2.0, 0.0, 0.5))
         block = w.createBlock(ol, dl, BlockDef(blockerPushForce = 900.0, defenderPushForce = 850.0, shedThreshold = 4000.0))
         return this

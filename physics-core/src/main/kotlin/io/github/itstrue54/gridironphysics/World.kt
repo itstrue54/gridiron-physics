@@ -1817,7 +1817,7 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
 
     // ---------------------------------------------------------------- snapshot and restore
 
-    // The layout below is WorldSnapshot.VERSION 1. Every field of Body, Joint, Contact, BallRecord and the
+    // The layout below is WorldSnapshot.VERSION 2 (restore also reads 1, which lacks the facing fields). Every field of Body, Joint, Contact, BallRecord and the
     // locomotion controller is written, scratch included, so a restored world is the same object graph bit for bit
     // (SnapshotTest checks that a restored world snapshots to the same bytes, and that the field lists still match).
 
@@ -1887,6 +1887,7 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
      */
     fun restore(s: WorldSnapshot) {
         val bytes = s.bytes
+        val version = s.version
         val r = ByteSource(bytes, WorldSnapshot.FINGERPRINT_OFFSET, bytes.size - 8)
         require(r.i64() == configFingerprint()) { "the snapshot is from a world with a different WorldConfig or FieldConfig" }
         val t = r.i64()
@@ -1900,9 +1901,9 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
         liveCount = r.i32(); highWater = r.i32()
         require(liveCount in 0..config.maxBodies && highWater in 0..config.maxBodies + 1) { "bad body counts" }
         for (i in 0..config.maxBodies) generations[i] = r.i32()
-        for (i in 0 until config.maxBodies) bodies[i] = if (r.bool()) readBody(r, null) else null
+        for (i in 0 until config.maxBodies) bodies[i] = if (r.bool()) readBody(r, null, version) else null
         val ballIn = r.bool()
-        readBody(r, ballBody)
+        readBody(r, ballBody, version)
         bodies[ballSlot] = if (ballIn) ballBody else null
         carrier = if (carrierId < 0) null else bodyFor(carrierId)
 
@@ -1912,7 +1913,7 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
         for (k in 0 until config.maxJoints) joints[k] = if (r.bool()) readJoint(r, jointPool[k]) else null
 
         val n = r.count(contacts.size, "contact")
-        for (i in 0 until n) readContact(r, contacts[i])
+        for (i in 0 until n) readContact(r, contacts[i], version)
         for (i in n until contacts.size) { contacts[i].a = null; contacts[i].b = null }
         contactCount = n
         for (c in oldContacts) { c.a = null; c.b = null }
@@ -1965,13 +1966,13 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
             Codec.athlete(s, c.params)
             val it = c.intent
             s.u8(it.mode.ordinal); s.f64(it.targetX); s.f64(it.targetY); s.f64(it.effort)
-            s.u8(it.stance?.ordinal ?: NO_STANCE)
+            s.u8(it.stance?.ordinal ?: NO_STANCE); s.bool(it.hasFacing); s.f64(it.faceAngle)
             s.f64(c.slip); s.bool(c.wantsMotion)
         }
     }
 
     /** A new body, or the fields of [into] (the loose-ball body, whose id, type and shape are fixed). */
-    private fun readBody(r: ByteSource, into: Body?): Body {
+    private fun readBody(r: ByteSource, into: Body?, version: Int): Body {
         val id = r.i32()
         val type = enumAt(BodyType.entries, r.u8(), "body type")
         val up = Codec.shape(r)
@@ -1992,12 +1993,14 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
         b.preVx = r.f64(); b.preVy = r.f64(); b.lineMask = r.i32(); b.outOfBounds = r.bool()
         b.reachRadius = r.f64(); b.reachHeight = r.f64(); b.inCatch = r.bool()
         if (r.bool()) {
-            val p = Codec.athlete(r)
+            val p = Codec.athlete(r, version)
             val c = LocomotionController(p)
             val mode = enumAt(LocomotionIntent.Mode.entries, r.u8(), "intent mode")
             val tx = r.f64(); val ty = r.f64(); val effort = r.f64()
             val st = r.u8()
-            c.intent.setRaw(mode, tx, ty, effort, if (st == NO_STANCE) null else enumAt(Stance.entries, st, "intent stance"))
+            val faces = version >= 2 && r.bool()
+            val face = if (version >= 2) r.f64() else 0.0
+            c.intent.setRaw(mode, tx, ty, effort, if (st == NO_STANCE) null else enumAt(Stance.entries, st, "intent stance"), faces, face)
             c.slip = r.f64(); c.wantsMotion = r.bool()
             b.loco = c
         } else {
@@ -2046,11 +2049,11 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
         }
     }
 
-    private fun readRef(r: ByteSource): Body = when (val k = r.u8()) {
+    private fun readRef(r: ByteSource, version: Int): Body = when (val k = r.u8()) {
         REF_WALL -> { val w = r.i32(); require(w in walls.indices) { "bad wall $w" }; walls[w] }
         REF_BALL -> ballBody
         REF_LIVE -> bodyFor(r.i32())
-        REF_DETACHED -> readBody(r, null).also { it.geom.set(it.shape, it.x, it.y, it.angle) }
+        REF_DETACHED -> readBody(r, null, version).also { it.geom.set(it.shape, it.x, it.y, it.angle) }
         else -> throw IllegalArgumentException("bad contact body kind $k")
     }
 
@@ -2069,8 +2072,8 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
         }
     }
 
-    private fun readContact(r: ByteSource, c: Contact) {
-        c.a = readRef(r); c.b = readRef(r)
+    private fun readContact(r: ByteSource, c: Contact, version: Int) {
+        c.a = readRef(r, version); c.b = readRef(r, version)
         c.key = r.i64(); c.idA = r.i32(); c.idB = r.i32(); c.wall = r.i32(); c.sensor = r.bool()
         c.friction = r.f64(); c.restitution = r.f64(); c.solve = r.bool()
         val m = c.m

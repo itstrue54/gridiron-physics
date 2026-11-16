@@ -437,6 +437,58 @@ class LocomotionTest {
         assertNotEquals(a.last(), c.last())
     }
 
+    // ------------------------------------------------------------ facing
+
+    @Test fun aBackpedalFacesUpfieldAndRunsAtTheOffFacingSpeed() {
+        val w = world()
+        val p = runner(w, x = 40.0)
+        // Facing +x (the line of scrimmage), running -x (deep): a defensive back's backpedal.
+        w.setIntent(p, LocomotionIntent().setVelocity(-20.0, 0.0).face(0.0))
+        repeat(300) { w.step() }
+        assertEquals(0.0, w.body(p).angle, 1e-9, "faces the way he was told")
+        assertEquals(grippy.offFacingSpeed * grippy.maxSpeed, speed(w, p), 0.01, "backpedals at offFacingSpeed × maxSpeed")
+        assertTrue(w.body(p).vx < 0.0, "while running away from his facing")
+    }
+
+    @Test fun aShuffleAcrossTheFacingIsAlsoCapped() {
+        val w = world()
+        val p = runner(w, ap = grippy.copy(offFacingSpeed = 0.5))
+        w.setIntent(p, LocomotionIntent().setVelocity(0.0, 20.0).face(0.0))
+        repeat(300) { w.step() }
+        assertEquals(0.5 * grippy.maxSpeed, speed(w, p), 0.01)
+        assertEquals(0.0, w.body(p).angle, 1e-9)
+    }
+
+    @Test fun runningTheWayHeFacesCostsNothing() {
+        val w = world()
+        val a = runner(w, y = 10.0)
+        val b = runner(w, y = 30.0)
+        w.setIntent(a, LocomotionIntent().setVelocity(20.0, 0.0).face(0.0))
+        w.setIntent(b, LocomotionIntent().setVelocity(20.0, 0.0))
+        repeat(200) {
+            w.step()
+            assertEquals(speed(w, b), speed(w, a), 1e-12, "same sprint curve")
+        }
+    }
+
+    @Test fun theFacingTurnsAtTheTurnRateAndSetVelocityClearsIt() {
+        val w = world()
+        val p = runner(w)
+        val intent = LocomotionIntent().setVelocity(5.0, 0.0).face(DMath.PI / 2)
+        w.setIntent(p, intent)
+        w.step()
+        assertEquals(grippy.turnRateAtRest * dt, w.body(p).angle, 1e-9, "one tick of turning at rest")
+        assertTrue(intent.hasFacing)
+        intent.setVelocity(5.0, 0.0)
+        assertFalse(intent.hasFacing, "a new mode clears the facing")
+        w.setIntent(p, intent)
+        repeat(120) { w.step() }
+        assertEquals(0.0, w.body(p).angle, 1e-6, "faces where he runs again")
+        assertFailsWith<IllegalArgumentException> { w.setIntent(p, LocomotionIntent().setIdle().face(Double.NaN)) }
+        assertFailsWith<IllegalArgumentException> { AthleteParams(offFacingSpeed = 0.0) }
+        assertFailsWith<IllegalArgumentException> { AthleteParams(offFacingSpeed = 1.1) }
+    }
+
     @Test fun stepDoesNotAllocateWithLocomotionAndContacts() {
         val mx = java.lang.management.ManagementFactory.getThreadMXBean() as? com.sun.management.ThreadMXBean ?: return
         if (!mx.isThreadAllocatedMemorySupported) return

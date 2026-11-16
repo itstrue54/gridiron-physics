@@ -459,6 +459,7 @@ class ScenariosTest {
 
     @Test fun registryListsDrift() {
         assertTrue(Scenarios.gameLoop in Scenarios.all)
+        assertTrue(Scenarios.backpedal in Scenarios.all)
         assertTrue(Scenarios.drift in Scenarios.all)
         assertTrue(Scenarios.sidelineRun in Scenarios.all)
         assertTrue(Scenarios.headOnTackle in Scenarios.all)
@@ -502,5 +503,25 @@ class ScenariosTest {
         val s = stepped()
         assertEquals(s, framed(doubleArrayOf(1.0 / 60)))
         assertEquals(s, framed(doubleArrayOf(0.008, 0.016, 0.033, 0.07, 0.0167)))
+    }
+
+    // ------------------------------------------------------------ M9 facing
+
+    @Test fun theCornerBackpedalsFacingTheLineThenOpensAndRuns() {
+        val w = Scenarios.backpedal.build()
+        val ids = IntArray(8)
+        val n = w.bodyIds(ids)
+        val corner = (0 until n).map { BodyId(ids[it]) }.first { w.body(it).userData == Tags.AWAY && w.body(it).y < w.field.widthM / 2 - 12.0 }
+        var backpedalled = false
+        var opened = false
+        repeat(240) {
+            w.step()
+            val c = w.body(corner)
+            val facesLine = DMath.cos(c.angle) < -0.99
+            if (facesLine && c.vx > 4.0) backpedalled = true
+            if (backpedalled && DMath.cos(c.angle) > 0.9 && c.vx > 7.0) opened = true
+        }
+        assertTrue(backpedalled, "he bails deep facing the line")
+        assertTrue(opened, "then turns and runs with the receiver")
     }
 }
