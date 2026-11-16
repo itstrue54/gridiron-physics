@@ -9,5 +9,5 @@ plugins {
 
 allprojects {
     group = "io.github.itstrue54"
-    version = "0.8.0"
+    version = "0.9.0"
 }

@@ -68,14 +68,22 @@ and in the module that uses it:
 
 ```kotlin
 dependencies {
-    implementation("io.github.itstrue54:gridiron-physics-core:0.8.0")
+    implementation("io.github.itstrue54:gridiron-physics-core:0.9.0")
 }
 ```
 
-(`implementation("io.github.itstrue54:physics-core:0.8.0")` also still works with a plain `includeBuild`.)
+(`implementation("io.github.itstrue54:physics-core:0.9.0")` also still works with a plain `includeBuild`.)
 
 **Published (approach B, optional).** `./gradlew :physics-core:publishToMavenLocal` puts the artifact in `mavenLocal()`;
 `./gradlew :physics-core:publish` with `GITHUB_ACTOR` and `GITHUB_TOKEN` set pushes it to this repo's GitHub Packages
 (nothing publishes automatically). A game then drops the `includeBuild` block and adds the repository
 (`maven("https://maven.pkg.github.com/itstrue54/gridiron-physics")` with credentials, or `mavenLocal()`); the
 dependency line stays the same.
+
+**Driving it every tick.** Put the game's per-tick decisions in a `TickListener` (`world.tickListener = ...`):
+`beforeTick` issues the tick's commands, `afterTick` reads its events. Then the render loop just calls
+`world.advance(frameSeconds)` and draws with the returned alpha, and the play comes out the same whatever the frame
+times. When the play is over the listener calls `world.stopAdvance()` so no tick runs past the whistle. Joints,
+stance changes and the non-boxing ball-carrier calls (`setBallCarrier(id)`, `clearBallCarrier()`, `hasBallCarrier`,
+`ballCarrierId`) allocate nothing, so a whole play can run without garbage. The "Game loop on the tick" scenario in
+physics-debug shows one.

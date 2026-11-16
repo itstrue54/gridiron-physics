@@ -82,6 +82,8 @@ Sidelines, end lines and goal lines are **sensors**, not walls. Bodies cross the
 
 The world advances in fixed 1/60 s ticks. A frame-time accumulator runs at most 4 ticks per rendered frame and exposes an interpolation alpha for smooth drawing. A variable timestep is never allowed.
 
+A game that decides between ticks (who blocks whom, when a tackle wraps up) sets a `TickListener` on the world. `step()` calls its `beforeTick` before phase 1, at the tick about to run, and its `afterTick` after phase 10, when `events()` holds that tick's events, however the tick was started. So `advance()` can carry the game, and a game that decides only in the listener plays out the same whatever the frame times. A listener whose play is over calls `stopAdvance()`, which ends the current `advance()` after that tick and drops the rest of the frame. A listener must not step the world.
+
 Each `world.step()` runs these phases in this order:
 
 1. **Apply intents:** read each player's locomotion target from the game layer and convert it to forces.
@@ -265,16 +267,22 @@ class World(config: WorldConfig, field: FieldConfig, seed: Long) {
     fun setIntent(id: BodyId, intent: LocomotionIntent)
     fun setAthlete(id: BodyId, params: AthleteParams)
 
-    fun createGrapple(tackler: BodyId, carrier: BodyId, def: GrappleDef): JointId
+    fun createGrapple(tackler: BodyId, carrier: BodyId, def: GrappleDef): JointId  // pooled: allocates nothing
     fun createBlock(blocker: BodyId, defender: BodyId, def: BlockDef): JointId
     fun destroyJoint(id: JointId)
+
+    fun setBallCarrier(id: BodyId)      // and clearBallCarrier(); neither boxes
+    val hasBallCarrier: Boolean
+    val ballCarrierId: BodyId           // throws when nobody holds the ball
 
     fun launchBall(from: Vec3, velocity: Vec3, mode: FlightMode)
     fun deflect(id: BodyId, impulse: Vec2)
     fun launchVelocityFor(from: Vec3, target: Vec2, apexHeight: Double): Vec3
 
-    fun step()                          // exactly one 1/60 s tick
+    fun step()                          // exactly one 1/60 s tick, between the tick listener's two calls
     fun advance(frameSeconds: Double): Double  // runs 0–4 ticks; returns alpha
+    var tickListener: TickListener?     // the game's beforeTick / afterTick
+    fun stopAdvance()                   // from the listener: end this advance after the current tick
 
     fun events(): EventReader           // drained each tick
     fun body(id: BodyId): BodyView      // read-only snapshot
@@ -289,6 +297,8 @@ class World(config: WorldConfig, field: FieldConfig, seed: Long) {
 ```
 
 `Vec2` and `Vec3` are mutable value holders pooled inside the engine; the API never returns a freshly allocated vector during play.
+
+The commands a game issues every tick allocate nothing either: joints come from a per-slot pool made with the world, a body's lying capsule is built when the body is created (so its first `Diving` or `Down` costs nothing), and the ball carrier has non-boxing forms (`setBallCarrier(BodyId)`, `clearBallCarrier()`, `hasBallCarrier`, `ballCarrierId`) beside the nullable `ballCarrier`.
 
 ## Debug tools
 

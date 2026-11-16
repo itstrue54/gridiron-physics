@@ -11,6 +11,8 @@ import io.github.itstrue54.gridironphysics.FlightMode
 import io.github.itstrue54.gridironphysics.Material
 import io.github.itstrue54.gridironphysics.ShapeDef
 import io.github.itstrue54.gridironphysics.Stance
+import io.github.itstrue54.gridironphysics.TickListener
+import io.github.itstrue54.gridironphysics.World
 import io.github.itstrue54.gridironphysics.math.DMath
 import io.github.itstrue54.gridironphysics.math.Vec3
 
@@ -18,6 +20,71 @@ import io.github.itstrue54.gridironphysics.math.Vec3
 object Scenarios {
 
     private const val YARD = 0.9144
+
+    /**
+     * M9: a game loop on the tick. A [TickListener] plays the game's part every tick, so the viewer's frame-driven
+     * advance carries it: the carrier cuts every 20 ticks, two pursuers aim at where he is heading, a pursuer within
+     * arm's reach wraps him up (a grapple whose drag slows him), and once he is slowed with a grip on him the game
+     * puts him down and calls the pursuers off. Everything the listener uses is made here, so its ticks allocate nothing.
+     */
+    val gameLoop = scenario(
+        name = "Game loop on the tick",
+        description = "A TickListener cuts the carrier, steers two pursuers, wraps him up and puts him down (M9)",
+        seed = 31L,
+    ) {
+        val back = AthleteParams(maxSpeed = 8.8, maxAccel = 7.5, maxDecel = 8.5, turnRateAtRest = 12.0, turnRateAtMax = 2.5)
+        val chaser = AthleteParams(maxSpeed = 9.0, maxAccel = 7.5, maxDecel = 8.5, turnRateAtRest = 12.0, turnRateAtMax = 2.5)
+        val mid = field.midfieldX
+        val cy = field.widthM / 2
+        world.setAttackDirection(1)
+        val carrier = athlete(mid - 12.0, cy, 92.0, 0.32, Tags.HOME, back, LocomotionIntent.velocity(7.0, 0.0), vx = 6.0)
+        world.setBallCarrier(carrier)
+        val pursuers = arrayOf(
+            athlete(mid + 2.0, cy + 9.0, 105.0, 0.34, Tags.AWAY, chaser, LocomotionIntent.velocity(-4.0, -4.0)),
+            athlete(mid + 6.0, cy - 7.0, 100.0, 0.34, Tags.AWAY, chaser, LocomotionIntent.velocity(-4.0, 3.0)),
+        )
+        world.tickListener = object : TickListener {
+            private val cut = LocomotionIntent()
+            private val aim = LocomotionIntent()
+            private val stop = LocomotionIntent().setIdle()
+            private val wrap = GrappleDef(breakForce = 2600.0, dragForce = 900.0)
+            private var gripped = false
+            private var down = false
+
+            override fun beforeTick(world: World) {
+                if (down) return
+                val c = world.body(carrier)
+                val cx = c.x; val cyNow = c.y; val cvx = c.vx; val cvy = c.vy
+                if (world.tick % 20 == 0L) {
+                    val side = if ((world.tick / 20) % 2 == 0L) 1.0 else -1.0
+                    world.setIntent(carrier, cut.setVelocity(7.5, 3.5 * side))
+                }
+                for (p in pursuers) {
+                    val b = world.body(p)
+                    val dx = cx - b.x; val dy = cyNow - b.y
+                    val d = DMath.sqrt(dx * dx + dy * dy)
+                    if (d < 0.95 && !gripped) {
+                        world.createGrapple(p, carrier, wrap)
+                        gripped = true
+                    }
+                    // Lead him by the time it takes to get there, capped at half a second.
+                    val lead = DMath.min(d / 9.0, 0.5)
+                    world.setIntent(p, aim.setPoint(cx + cvx * lead, cyNow + cvy * lead))
+                }
+            }
+
+            override fun afterTick(world: World) {
+                if (down || !gripped) return
+                val c = world.body(carrier)
+                if (c.vx * c.vx + c.vy * c.vy < 2.25) {
+                    world.setStance(carrier, Stance.Down)
+                    world.setIntent(carrier, stop)
+                    for (p in pursuers) world.setIntent(p, stop)
+                    down = true
+                }
+            }
+        }
+    }
 
     /**
      * M6: a go route down the near sideline in a crosswind blowing toward that sideline (and a little into the
@@ -396,7 +463,7 @@ object Scenarios {
         world.launchBall(from, v, FlightMode.Spiral)
     }
 
-    val all: List<Scenario> = listOf(scrimmage, deepPass, punt, fieldGoal, tackleWithGrapple, doubleTeam, headOnTackle, sidelineRun, eventLab, contactLab, drift)
+    val all: List<Scenario> = listOf(scrimmage, gameLoop, deepPass, punt, fieldGoal, tackleWithGrapple, doubleTeam, headOnTackle, sidelineRun, eventLab, contactLab, drift)
 
     /** Angular damping for coasting bodies (no locomotion holds their heading). */
     private const val SPIN_DAMPING = 8.0

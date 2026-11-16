@@ -6,20 +6,37 @@ import io.github.itstrue54.gridironphysics.math.DMath
 
 /** Catto's soft-step coefficients for one spring frequency and damping ratio at the fixed timestep. */
 internal class Softness private constructor(
-    @JvmField val biasRate: Double,
-    @JvmField val massScale: Double,
-    @JvmField val impulseScale: Double,
+    biasRate: Double,
+    massScale: Double,
+    impulseScale: Double,
 ) {
+    // Changed only through assign / assignRaw, and only on a joint's own instance (never RIGID_RELAX).
+    @JvmField var biasRate = biasRate
+    @JvmField var massScale = massScale
+    @JvmField var impulseScale = impulseScale
+
+    /** Sets the coefficients for [hertz] and [dampingRatio]; hertz 0 gives [RIGID_RELAX]'s values. */
+    fun assign(hertz: Double, dampingRatio: Double): Softness {
+        if (hertz == 0.0) return assignRaw(0.0, 1.0, 0.0)
+        val h = WorldConfig.DT
+        val omega = 2.0 * DMath.PI * hertz
+        val a1 = 2.0 * dampingRatio + h * omega
+        val a2 = h * omega * a1
+        val a3 = 1.0 / (1.0 + a2)
+        return assignRaw(omega / a1, a2 * a3, a3)
+    }
+
+    fun assignRaw(biasRate: Double, massScale: Double, impulseScale: Double): Softness {
+        this.biasRate = biasRate; this.massScale = massScale; this.impulseScale = impulseScale
+        return this
+    }
+
     companion object {
-        fun of(hertz: Double, dampingRatio: Double): Softness {
-            if (hertz == 0.0) return RIGID_RELAX
-            val h = WorldConfig.DT
-            val omega = 2.0 * DMath.PI * hertz
-            val a1 = 2.0 * dampingRatio + h * omega
-            val a2 = h * omega * a1
-            val a3 = 1.0 / (1.0 + a2)
-            return Softness(omega / a1, a2 * a3, a3)
-        }
+        fun of(hertz: Double, dampingRatio: Double): Softness =
+            if (hertz == 0.0) RIGID_RELAX else Softness(0.0, 1.0, 0.0).assign(hertz, dampingRatio)
+
+        /** Scratch coefficients for a pooled joint, set with [assign] when the joint is made. */
+        fun mutable(): Softness = Softness(0.0, 1.0, 0.0)
 
         /** Fully rigid with no position bias: the relax pass of a rigid row. */
         val RIGID_RELAX = Softness(0.0, 1.0, 0.0)
@@ -35,16 +52,36 @@ internal class Softness private constructor(
  * Internal joint record. Body A is the tackler / blocker / first body, B the carrier / defender / second body.
  * All rows act at the body centers except the weld, whose A anchor sits at B's center in A's frame.
  * Accumulated impulses persist across ticks (warm start), except the grapple's drag.
+ *
+ * The world keeps one record per joint slot and reuses it ([reset]), so making a joint allocates nothing.
  */
 internal class Joint(
-    @JvmField val id: Int,
-    @JvmField val type: JointType,
-    @JvmField val a: Body,
-    @JvmField val b: Body,
-    @JvmField val restLength: Double,
-    /** The def's spring, or null for a rigid row. */
-    @JvmField val soft: Softness?,
+    @JvmField var id: Int,
+    @JvmField var type: JointType,
+    @JvmField var a: Body,
+    @JvmField var b: Body,
+    @JvmField var restLength: Double,
+    /** The def's spring ([ownSoft]), or null for a rigid row. */
+    @JvmField var soft: Softness?,
 ) {
+    /** This record's own spring coefficients, which [soft] points at when the joint has a spring. */
+    @JvmField val ownSoft: Softness = Softness.mutable()
+
+    /** Makes this record a new joint: every field as a freshly constructed one, then the identity given. */
+    fun reset(id: Int, type: JointType, a: Body, b: Body, restLength: Double, hasSpring: Boolean): Joint {
+        this.id = id; this.type = type; this.a = a; this.b = b; this.restLength = restLength
+        soft = if (hasSpring) ownSoft else null
+        breakForce = Double.POSITIVE_INFINITY; dragForce = 0.0
+        pushForceA = 0.0; pushForceB = 0.0; shedThreshold = Double.POSITIVE_INFINITY; driveSpeed = 1.0
+        pushA = 0.0; pushB = 0.0
+        localX = 0.0; localY = 0.0; refAngle = 0.0
+        axial = 0.0; lateral = 0.0; dragX = 0.0; dragY = 0.0; linX = 0.0; linY = 0.0; angular = 0.0
+        solve = false; ux = 1.0; uy = 0.0; len = 0.0; axialMass = 0.0; rAx = 0.0; rAy = 0.0
+        k11 = 0.0; k12 = 0.0; k22 = 0.0; angularMass = 0.0
+        broken = false
+        return this
+    }
+
     // Grapple
     @JvmField var breakForce = Double.POSITIVE_INFINITY
     @JvmField var dragForce = 0.0

@@ -29,6 +29,9 @@ interface CommandRecorder {
     /** Only calls to [World.destroyJoint]; joints that break, or go with a destroyed body, are not commands. */
     fun onDestroyJoint(tick: Long, id: JointId)
     fun onSetBallCarrier(tick: Long, id: BodyId?)
+
+    /** [World.setBallCarrier] with a body. Override it to record without boxing; the default forwards to [onSetBallCarrier]. */
+    fun onGiveBall(tick: Long, id: BodyId) = onSetBallCarrier(tick, id)
     fun onSetAttackDirection(tick: Long, direction: Int)
 
     /** [from] and [velocity] are the caller's objects and only valid during this call: copy the values. */

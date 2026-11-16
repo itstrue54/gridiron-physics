@@ -4,6 +4,7 @@ import io.github.itstrue54.gridironphysics.BodyId
 import io.github.itstrue54.gridironphysics.BodyType
 import io.github.itstrue54.gridironphysics.EventType
 import io.github.itstrue54.gridironphysics.ShapeDef
+import io.github.itstrue54.gridironphysics.Stance
 import io.github.itstrue54.gridironphysics.World
 import io.github.itstrue54.gridironphysics.math.DMath
 import kotlin.test.Test
@@ -457,6 +458,7 @@ class ScenariosTest {
     }
 
     @Test fun registryListsDrift() {
+        assertTrue(Scenarios.gameLoop in Scenarios.all)
         assertTrue(Scenarios.drift in Scenarios.all)
         assertTrue(Scenarios.sidelineRun in Scenarios.all)
         assertTrue(Scenarios.headOnTackle in Scenarios.all)
@@ -468,5 +470,37 @@ class ScenariosTest {
         assertTrue(Scenarios.punt in Scenarios.all)
         assertTrue(Scenarios.fieldGoal in Scenarios.all)
         assertEquals(Scenarios.all.size, Scenarios.all.map { it.name }.toSet().size, "scenario names are unique")
+    }
+
+    // ------------------------------------------------------------ M9 game loop
+
+    @Test fun gameLoopWrapsUpTheCarrierAndPutsHimDown() {
+        val w = Scenarios.gameLoop.build()
+        val carrier = w.ballCarrierId
+        var grappled = false
+        var downAt = -1L
+        repeat(600) {
+            w.step()
+            val e = w.events()
+            while (e.next()) if (e.type == EventType.Down && e.ballCarrier) downAt = e.tick
+            if (w.jointCount > 0) grappled = true
+        }
+        assertTrue(grappled, "a pursuer wrapped him up")
+        assertTrue(downAt in 1L..600L, "the game put him down: $downAt")
+        assertEquals(Stance.Down, w.body(carrier).stance)
+        assertTrue(w.body(carrier).x > w.field.midfieldX - 12.0, "he gained ground first")
+    }
+
+    @Test fun gameLoopIsTheSameHoweverTheFramesFall() {
+        fun stepped(): Long { val w = Scenarios.gameLoop.build(); repeat(480) { w.step() }; return w.stateHash() }
+        fun framed(frames: DoubleArray): Long {
+            val w = Scenarios.gameLoop.build()
+            var k = 0
+            while (w.tick < 480) w.advance(DMath.min(frames[k++ % frames.size], (480 - w.tick) / 60.0))
+            return w.stateHash()
+        }
+        val s = stepped()
+        assertEquals(s, framed(doubleArrayOf(1.0 / 60)))
+        assertEquals(s, framed(doubleArrayOf(0.008, 0.016, 0.033, 0.07, 0.0167)))
     }
 }

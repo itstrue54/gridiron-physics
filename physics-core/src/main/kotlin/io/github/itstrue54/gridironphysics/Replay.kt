@@ -228,6 +228,10 @@ class ReplayRecorder(commandCapacityBytes: Int = 1 shl 20, tickCapacity: Int = 6
         head(tick, Replay.OP_SET_BALL_CARRIER); log.i32(id?.value ?: -1)
     }
 
+    override fun onGiveBall(tick: Long, id: BodyId) {
+        head(tick, Replay.OP_SET_BALL_CARRIER); log.i32(id.value)
+    }
+
     override fun onSetAttackDirection(tick: Long, direction: Int) {
         head(tick, Replay.OP_ATTACK_DIRECTION); log.i32(direction)
     }
