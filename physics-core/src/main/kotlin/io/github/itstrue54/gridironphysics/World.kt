@@ -145,6 +145,7 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
         b.categoryBits = def.categoryBits; b.maskBits = def.maskBits; b.material = def.material
         b.baseMaterial = def.material
         b.extent = shapeExtent(def.shape)
+        b.lyingSpare = lyingFor(b)
         if (def.type == BodyType.Dynamic) {
             b.mass = def.mass
             b.invMass = 1.0 / def.mass
@@ -291,12 +292,19 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
         require(b.uprightShape is ShapeDef.Circle) { "Stance needs a body created with a Circle (its Upright collider): body ${b.id} is ${b.uprightShape}" }
     }
 
+    /** A dynamic body with a Circle collider can lie down: its lying capsule, built now so falling allocates nothing. */
+    private fun lyingFor(b: Body): ShapeDef.Capsule? {
+        val up = b.uprightShape
+        if (b.type != BodyType.Dynamic || up !is ShapeDef.Circle) return null
+        return ShapeDef.Capsule(LYING_HALF_LENGTH * up.radius, LYING_RADIUS * up.radius, up.sensor)
+    }
+
     private fun applyStance(b: Body, stance: Stance) {
         val up = b.uprightShape as ShapeDef.Circle
         val shape: ShapeDef = if (stance == Stance.Upright) {
             up
         } else {
-            b.lyingShape ?: ShapeDef.Capsule(LYING_HALF_LENGTH * up.radius, LYING_RADIUS * up.radius, up.sensor).also { b.lyingShape = it }
+            b.lyingShape ?: (b.lyingSpare ?: lyingFor(b)!!).also { b.lyingShape = it }
         }
         if (stance == Stance.Down && b.stance != Stance.Down) {
             // Stances change between steps, so the event carries the current tick.
@@ -338,6 +346,8 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
     // Slot-indexed like bodies: iterating slots in order is iterating joints in ascending id order, which is the
     // order the solver runs them in.
     private val joints = arrayOfNulls<Joint>(config.maxJoints)
+    /** One reusable record per slot, made with the world: a live slot's joint is its record. */
+    private val jointPool = Array(config.maxJoints) { Joint(-1, JointType.Grapple, ballBody, ballBody, 0.0, null) }
     private val jointGenerations = IntArray(config.maxJoints)
     private var jointLive = 0
     private var jointHighWater = 0
@@ -355,7 +365,7 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
     fun createGrapple(tackler: BodyId, carrier: BodyId, def: GrappleDef): JointId {
         val t = live(tackler); val c = live(carrier)
         require(c.type == BodyType.Dynamic) { "The carrier must be dynamic: body ${carrier.value} is ${c.type}" }
-        val j = newJoint(JointType.Grapple, t, c, def.length, Softness.of(def.hertz, def.dampingRatio))
+        val j = newJoint(JointType.Grapple, t, c, def.length, def.hertz, def.dampingRatio)
         j.breakForce = def.breakForce
         j.dragForce = def.dragForce
         val id = JointId(j.id)
@@ -369,7 +379,7 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
      */
     fun createBlock(blocker: BodyId, defender: BodyId, def: BlockDef): JointId {
         val a = live(blocker); val b = live(defender)
-        val j = newJoint(JointType.Block, a, b, def.length, Softness.of(def.hertz, def.dampingRatio))
+        val j = newJoint(JointType.Block, a, b, def.length, def.hertz, def.dampingRatio)
         j.pushForceA = def.blockerPushForce
         j.pushForceB = def.defenderPushForce
         j.shedThreshold = def.shedThreshold
@@ -382,7 +392,7 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
     /** Holds the centers of [a] and [b] at a distance, rigidly or as a spring; see [DistanceDef]. Wakes both. */
     fun createDistance(a: BodyId, b: BodyId, def: DistanceDef): JointId {
         val ba = live(a); val bb = live(b)
-        val j = newJoint(JointType.Distance, ba, bb, def.length, if (def.hertz == 0.0) null else Softness.of(def.hertz, def.dampingRatio))
+        val j = newJoint(JointType.Distance, ba, bb, def.length, def.hertz, def.dampingRatio, rigidAtZero = true)
         val id = JointId(j.id)
         recorder?.onCreateDistance(tick, id, a, b, def)
         return id
@@ -391,7 +401,7 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
     /** Glues [b] to [a] in their current relative position and angle; see [WeldDef]. Wakes both. */
     fun createWeld(a: BodyId, b: BodyId, def: WeldDef): JointId {
         val ba = live(a); val bb = live(b)
-        val j = newJoint(JointType.Weld, ba, bb, null, if (def.hertz == 0.0) null else Softness.of(def.hertz, def.dampingRatio))
+        val j = newJoint(JointType.Weld, ba, bb, null, def.hertz, def.dampingRatio, rigidAtZero = true)
         val c = DMath.cos(ba.angle); val s = DMath.sin(ba.angle)
         val dx = bb.x - ba.x; val dy = bb.y - ba.y
         j.localX = c * dx + s * dy
@@ -442,7 +452,13 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
         return joints[id.slot]!!
     }
 
-    private fun newJoint(type: JointType, a: Body, b: Body, length: Double?, soft: Softness?): Joint {
+    /**
+     * Makes a joint in the lowest free slot from that slot's pooled record. Grapples and blocks always have a spring
+     * (hertz 0 gives the rigid-relax coefficients); distance and weld joints with hertz 0 ([rigidAtZero]) are rigid rows.
+     */
+    private fun newJoint(
+        type: JointType, a: Body, b: Body, length: Double?, hertz: Double, dampingRatio: Double, rigidAtZero: Boolean = false,
+    ): Joint {
         require(a !== b) { "A joint needs two different bodies: ${a.id}" }
         require(a !== ballBody && b !== ballBody) { "The ball cannot be jointed" }
         require(a.type == BodyType.Dynamic || b.type == BodyType.Dynamic) { "A joint needs a dynamic body: ${a.id} is ${a.type}, ${b.id} is ${b.type}" }
@@ -453,7 +469,9 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
         val rest = length ?: DMath.hypot2(b.x - a.x, b.y - a.y)
         // A centre-to-centre joint of length 0 has no direction to act along.
         require(type == JointType.Weld || rest > Joint.MIN_LENGTH) { "Bodies ${a.id} and ${b.id} share a center: pass a length in the def" }
-        val j = Joint(id.value, type, a, b, rest, soft)
+        val spring = !(rigidAtZero && hertz == 0.0)
+        val j = jointPool[slot].reset(id.value, type, a, b, rest, spring)
+        if (spring) j.ownSoft.assign(hertz, dampingRatio)
         joints[slot] = j
         jointLive++
         if (slot >= jointHighWater) jointHighWater = slot + 1
@@ -485,8 +503,19 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
     var forwardProgressX: Double = Double.NaN
         private set
 
-    /** The body holding the ball, or null. */
+    /** The body holding the ball, or null. Boxes its result: a per-tick reader uses [hasBallCarrier] and [ballCarrierId]. */
     val ballCarrier: BodyId? get() = carrier?.let { BodyId(it.id) }
+
+    /** True while a body holds the ball. */
+    val hasBallCarrier: Boolean get() = carrier != null
+
+    /** The body holding the ball, without boxing. Throws [IllegalStateException] when nobody holds it ([hasBallCarrier]). */
+    val ballCarrierId: BodyId
+        get() {
+            val c = carrier
+            check(c != null) { "Nobody holds the ball" }
+            return BodyId(c.id)
+        }
 
     /**
      * Gives the ball to [id] (a dynamic body), or takes it away with null. Possession is the game's call: giving the
@@ -495,21 +524,30 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
      * carrier's current x.
      */
     fun setBallCarrier(id: BodyId?) {
-        if (id == null) {
-            carrier = null
-            forwardProgressX = Double.NaN
-            if (ball.mode == BallRecord.MODE_CARRIED) { ball.mode = BallRecord.MODE_DEAD; ball.vx = 0.0; ball.vy = 0.0; ball.vz = 0.0 }
-        } else {
-            val b = gameBody(id)
-            require(b.type == BodyType.Dynamic) { "The ball carrier must be dynamic: body ${id.value} is ${b.type}" }
-            if (ball.mode == BallRecord.MODE_LOOSE) removeBallBody()
-            carrier = b
-            forwardProgressX = b.x
-            ball.mode = BallRecord.MODE_CARRIED
-            carryBall()
-            ball.prevX = ball.x; ball.prevY = ball.y; ball.prevZ = ball.z
-        }
-        recorder?.onSetBallCarrier(tick, id)
+        if (id == null) clearBallCarrier() else giveBall(id)
+    }
+
+    /** [setBallCarrier] for a body, without boxing the id. */
+    fun setBallCarrier(id: BodyId) = giveBall(id)
+
+    /** [setBallCarrier] with null: takes the ball from its carrier, [BallState.Dead] where it is. */
+    fun clearBallCarrier() {
+        carrier = null
+        forwardProgressX = Double.NaN
+        if (ball.mode == BallRecord.MODE_CARRIED) { ball.mode = BallRecord.MODE_DEAD; ball.vx = 0.0; ball.vy = 0.0; ball.vz = 0.0 }
+        recorder?.onSetBallCarrier(tick, null)
+    }
+
+    private fun giveBall(id: BodyId) {
+        val b = gameBody(id)
+        require(b.type == BodyType.Dynamic) { "The ball carrier must be dynamic: body ${id.value} is ${b.type}" }
+        if (ball.mode == BallRecord.MODE_LOOSE) removeBallBody()
+        carrier = b
+        forwardProgressX = b.x
+        ball.mode = BallRecord.MODE_CARRIED
+        carryBall()
+        ball.prevX = ball.x; ball.prevY = ball.y; ball.prevZ = ball.z
+        recorder?.onGiveBall(tick, id)
     }
 
     /** Sets which way the offense attacks (+1 or −1). Tracking restarts from the carrier's current x. */
@@ -620,6 +658,25 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
 
     private var accumulator = 0.0
 
+    /**
+     * The game's code to run around every tick ([TickListener.beforeTick], [TickListener.afterTick]), or null.
+     * [step] calls it however the tick was started, so [advance] can drive a game that decides between ticks.
+     */
+    var tickListener: TickListener? = null
+
+    private var stepping = false
+    private var advancing = false
+    private var stopRequested = false
+
+    /**
+     * Ends the [advance] in progress after the current tick and drops the rest of its frame time (alpha 0). For a
+     * [TickListener] whose play is over, so no tick runs past the whistle however long the frame was. Outside an
+     * advance it does nothing.
+     */
+    fun stopAdvance() {
+        if (advancing) stopRequested = true
+    }
+
     /** Leftover fraction of a tick after the last [advance], in [0, 1). Use it to interpolate drawing. */
     var alpha: Double = 0.0
         private set
@@ -634,10 +691,18 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
         val dt = WorldConfig.DT
         if (frameSeconds > 0.0) accumulator += frameSeconds
         var ticks = 0
-        while (ticks < config.maxTicksPerFrame && accumulator >= dt - ADVANCE_EPS) {
-            step()
-            accumulator -= dt
-            ticks++
+        advancing = true
+        stopRequested = false
+        try {
+            while (ticks < config.maxTicksPerFrame && accumulator >= dt - ADVANCE_EPS) {
+                step()
+                accumulator -= dt
+                ticks++
+                if (stopRequested) { accumulator = 0.0; break }
+            }
+        } finally {
+            advancing = false
+            stopRequested = false
         }
         // Keep the leftover strictly below one tick's threshold so dropped time never resurfaces.
         val maxLeft = dt - 2 * ADVANCE_EPS
@@ -648,8 +713,20 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
 
     // ---------------------------------------------------------------- step
 
-    /** Advances exactly one 1/60 s tick, running the spec's ten phases in order. */
+    /** Advances exactly one 1/60 s tick, running the spec's ten phases in order between [tickListener]'s two calls. */
     fun step() {
+        check(!stepping) { "step() inside a tick: a TickListener must not step the world" }
+        stepping = true
+        try {
+            tickListener?.beforeTick(this)
+            runTick()
+            tickListener?.afterTick(this)
+        } finally {
+            stepping = false
+        }
+    }
+
+    private fun runTick() {
         wakeJointBodies()
         applyIntents()
         applyJointForces()
@@ -1740,7 +1817,7 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
 
     // ---------------------------------------------------------------- snapshot and restore
 
-    // The layout below is WorldSnapshot.VERSION 1. Every field of Body, Joint, Contact, BallRecord and the
+    // The layout below is WorldSnapshot.VERSION 2 (restore also reads 1, which lacks the facing fields). Every field of Body, Joint, Contact, BallRecord and the
     // locomotion controller is written, scratch included, so a restored world is the same object graph bit for bit
     // (SnapshotTest checks that a restored world snapshots to the same bytes, and that the field lists still match).
 
@@ -1810,6 +1887,7 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
      */
     fun restore(s: WorldSnapshot) {
         val bytes = s.bytes
+        val version = s.version
         val r = ByteSource(bytes, WorldSnapshot.FINGERPRINT_OFFSET, bytes.size - 8)
         require(r.i64() == configFingerprint()) { "the snapshot is from a world with a different WorldConfig or FieldConfig" }
         val t = r.i64()
@@ -1823,19 +1901,19 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
         liveCount = r.i32(); highWater = r.i32()
         require(liveCount in 0..config.maxBodies && highWater in 0..config.maxBodies + 1) { "bad body counts" }
         for (i in 0..config.maxBodies) generations[i] = r.i32()
-        for (i in 0 until config.maxBodies) bodies[i] = if (r.bool()) readBody(r, null) else null
+        for (i in 0 until config.maxBodies) bodies[i] = if (r.bool()) readBody(r, null, version) else null
         val ballIn = r.bool()
-        readBody(r, ballBody)
+        readBody(r, ballBody, version)
         bodies[ballSlot] = if (ballIn) ballBody else null
         carrier = if (carrierId < 0) null else bodyFor(carrierId)
 
         jointLive = r.i32(); jointHighWater = r.i32()
         require(jointLive in 0..config.maxJoints && jointHighWater in 0..config.maxJoints) { "bad joint counts" }
         for (k in 0 until config.maxJoints) jointGenerations[k] = r.i32()
-        for (k in 0 until config.maxJoints) joints[k] = if (r.bool()) readJoint(r) else null
+        for (k in 0 until config.maxJoints) joints[k] = if (r.bool()) readJoint(r, jointPool[k]) else null
 
         val n = r.count(contacts.size, "contact")
-        for (i in 0 until n) readContact(r, contacts[i])
+        for (i in 0 until n) readContact(r, contacts[i], version)
         for (i in n until contacts.size) { contacts[i].a = null; contacts[i].b = null }
         contactCount = n
         for (c in oldContacts) { c.a = null; c.b = null }
@@ -1888,13 +1966,13 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
             Codec.athlete(s, c.params)
             val it = c.intent
             s.u8(it.mode.ordinal); s.f64(it.targetX); s.f64(it.targetY); s.f64(it.effort)
-            s.u8(it.stance?.ordinal ?: NO_STANCE)
+            s.u8(it.stance?.ordinal ?: NO_STANCE); s.bool(it.hasFacing); s.f64(it.faceAngle)
             s.f64(c.slip); s.bool(c.wantsMotion)
         }
     }
 
     /** A new body, or the fields of [into] (the loose-ball body, whose id, type and shape are fixed). */
-    private fun readBody(r: ByteSource, into: Body?): Body {
+    private fun readBody(r: ByteSource, into: Body?, version: Int): Body {
         val id = r.i32()
         val type = enumAt(BodyType.entries, r.u8(), "body type")
         val up = Codec.shape(r)
@@ -1902,6 +1980,7 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
         require(b.id == id && b.type == type) { "snapshot body $id does not match the engine's ball body" }
         val ly = if (r.bool()) (Codec.shape(r) as? ShapeDef.Capsule ?: throw IllegalArgumentException("lying shape must be a capsule")) else null
         b.lyingShape = ly
+        b.lyingSpare = ly ?: lyingFor(b)
         b.shape = if (r.bool()) (ly ?: throw IllegalArgumentException("body $id lies without a lying shape")) else b.uprightShape
         b.x = r.f64(); b.y = r.f64(); b.prevX = r.f64(); b.prevY = r.f64(); b.angle = r.f64()
         b.vx = r.f64(); b.vy = r.f64(); b.angularVelocity = r.f64()
@@ -1914,12 +1993,14 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
         b.preVx = r.f64(); b.preVy = r.f64(); b.lineMask = r.i32(); b.outOfBounds = r.bool()
         b.reachRadius = r.f64(); b.reachHeight = r.f64(); b.inCatch = r.bool()
         if (r.bool()) {
-            val p = Codec.athlete(r)
+            val p = Codec.athlete(r, version)
             val c = LocomotionController(p)
             val mode = enumAt(LocomotionIntent.Mode.entries, r.u8(), "intent mode")
             val tx = r.f64(); val ty = r.f64(); val effort = r.f64()
             val st = r.u8()
-            c.intent.setRaw(mode, tx, ty, effort, if (st == NO_STANCE) null else enumAt(Stance.entries, st, "intent stance"))
+            val faces = version >= 2 && r.bool()
+            val face = if (version >= 2) r.f64() else 0.0
+            c.intent.setRaw(mode, tx, ty, effort, if (st == NO_STANCE) null else enumAt(Stance.entries, st, "intent stance"), faces, face)
             c.slip = r.f64(); c.wantsMotion = r.bool()
             b.loco = c
         } else {
@@ -1941,13 +2022,14 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
         s.f64(j.k11); s.f64(j.k12); s.f64(j.k22); s.f64(j.angularMass); s.bool(j.broken)
     }
 
-    private fun readJoint(r: ByteSource): Joint {
+    private fun readJoint(r: ByteSource, into: Joint): Joint {
         val id = r.i32()
         val type = enumAt(JointType.entries, r.u8(), "joint type")
         val a = bodyFor(r.i32()); val b = bodyFor(r.i32())
         val rest = r.f64()
-        val soft = if (r.bool()) { val br = r.f64(); val ms = r.f64(); Softness.raw(br, ms, r.f64()) } else null
-        val j = Joint(id, type, a, b, rest, soft)
+        val spring = r.bool()
+        val j = into.reset(id, type, a, b, rest, spring)
+        if (spring) { val br = r.f64(); val ms = r.f64(); j.ownSoft.assignRaw(br, ms, r.f64()) }
         j.breakForce = r.f64(); j.dragForce = r.f64()
         j.pushForceA = r.f64(); j.pushForceB = r.f64(); j.shedThreshold = r.f64(); j.driveSpeed = r.f64(); j.pushA = r.f64(); j.pushB = r.f64()
         j.localX = r.f64(); j.localY = r.f64(); j.refAngle = r.f64()
@@ -1967,11 +2049,11 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
         }
     }
 
-    private fun readRef(r: ByteSource): Body = when (val k = r.u8()) {
+    private fun readRef(r: ByteSource, version: Int): Body = when (val k = r.u8()) {
         REF_WALL -> { val w = r.i32(); require(w in walls.indices) { "bad wall $w" }; walls[w] }
         REF_BALL -> ballBody
         REF_LIVE -> bodyFor(r.i32())
-        REF_DETACHED -> readBody(r, null).also { it.geom.set(it.shape, it.x, it.y, it.angle) }
+        REF_DETACHED -> readBody(r, null, version).also { it.geom.set(it.shape, it.x, it.y, it.angle) }
         else -> throw IllegalArgumentException("bad contact body kind $k")
     }
 
@@ -1990,8 +2072,8 @@ class World(val config: WorldConfig, val field: FieldConfig, val seed: Long) {
         }
     }
 
-    private fun readContact(r: ByteSource, c: Contact) {
-        c.a = readRef(r); c.b = readRef(r)
+    private fun readContact(r: ByteSource, c: Contact, version: Int) {
+        c.a = readRef(r, version); c.b = readRef(r, version)
         c.key = r.i64(); c.idA = r.i32(); c.idB = r.i32(); c.wall = r.i32(); c.sensor = r.bool()
         c.friction = r.f64(); c.restitution = r.f64(); c.solve = r.bool()
         val m = c.m

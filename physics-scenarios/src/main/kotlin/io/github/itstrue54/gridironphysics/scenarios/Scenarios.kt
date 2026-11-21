@@ -11,6 +11,8 @@ import io.github.itstrue54.gridironphysics.FlightMode
 import io.github.itstrue54.gridironphysics.Material
 import io.github.itstrue54.gridironphysics.ShapeDef
 import io.github.itstrue54.gridironphysics.Stance
+import io.github.itstrue54.gridironphysics.TickListener
+import io.github.itstrue54.gridironphysics.World
 import io.github.itstrue54.gridironphysics.math.DMath
 import io.github.itstrue54.gridironphysics.math.Vec3
 
@@ -18,6 +20,114 @@ import io.github.itstrue54.gridironphysics.math.Vec3
 object Scenarios {
 
     private const val YARD = 0.9144
+
+    /**
+     * M9: facing. A corner in off coverage backpedals facing the line while a receiver runs a go route at him; once the
+     * receiver closes to 3 yards the corner opens his hips (drops the facing) and runs with him. A tackle kick-slides
+     * back and out, still facing the line, to meet an edge rusher. Both use [LocomotionIntent.face], so they move at
+     * AthleteParams.offFacingSpeed of their top speed until they turn and run.
+     */
+    val backpedal = scenario(
+        name = "Backpedal and kick slide",
+        description = "A corner backpedals facing the line, then opens and runs; a tackle kick-slides facing a rusher (M9)",
+        seed = 37L,
+    ) {
+        val wr = AthleteParams(maxSpeed = 9.6, maxAccel = 11.0, maxDecel = 8.5, turnRateAtRest = 12.0, turnRateAtMax = 2.5)
+        val cb = AthleteParams(maxSpeed = 9.4, maxAccel = 11.0, maxDecel = 8.5, turnRateAtRest = 12.0, turnRateAtMax = 2.5, offFacingSpeed = 0.68)
+        val ot = AthleteParams(maxSpeed = 6.8, maxAccel = 6.5, maxDecel = 7.0, turnRateAtRest = 10.0, turnRateAtMax = 2.0, offFacingSpeed = 0.55)
+        val edge = AthleteParams(maxSpeed = 8.6, maxAccel = 9.0, maxDecel = 8.0, turnRateAtRest = 11.0, turnRateAtMax = 2.5)
+        val los = field.midfieldX
+        val cy = field.widthM / 2
+        world.setAttackDirection(1)
+        val receiver = athlete(los, cy - 18.0, 90.0, 0.32, Tags.HOME, wr, LocomotionIntent.velocity(10.0, 0.0))
+        val corner = athlete(los + 7 * YARD, cy - 18.0, 88.0, 0.32, Tags.AWAY, cb, LocomotionIntent().setVelocity(10.0, 0.0).face(DMath.PI))
+        val tackle = athlete(los - 0.6, cy - 4.0, 145.0, 0.40, Tags.HOME, ot, LocomotionIntent().setPoint(los - 4.0, cy - 6.0).face(0.0))
+        val rusher = athlete(los + 0.6, cy - 6.0, 120.0, 0.37, Tags.AWAY, edge, LocomotionIntent.point(los - 6.0, cy - 3.0))
+        world.tickListener = object : TickListener {
+            private val drop = LocomotionIntent()
+            private val slide = LocomotionIntent()
+            private var opened = false
+
+            override fun beforeTick(world: World) {
+                // body() hands back one shared view: read what is needed before asking for the next body.
+                val rx = world.body(receiver).x
+                if (!opened && world.body(corner).x - rx < 3 * YARD) opened = true
+                // The corner backpedals to keep his cushion, facing the line (-x is toward the line for the defense).
+                if (opened) world.setIntent(corner, drop.setVelocity(10.0, 0.0))
+                else world.setIntent(corner, drop.setVelocity(10.0, 0.0).face(DMath.PI))
+                // The tackle mirrors the rusher's depth and width, square to the line.
+                val e = world.body(rusher)
+                val ex = e.x; val ey = e.y
+                val tx = world.body(tackle).x
+                world.setIntent(tackle, slide.setPoint(DMath.min(ex, tx), ey - 0.6).face(0.0))
+            }
+        }
+    }
+
+    /**
+     * M9: a game loop on the tick. A [TickListener] plays the game's part every tick, so the viewer's frame-driven
+     * advance carries it: the carrier cuts every 20 ticks, two pursuers aim at where he is heading, a pursuer within
+     * arm's reach wraps him up (a grapple whose drag slows him), and once he is slowed with a grip on him the game
+     * puts him down and calls the pursuers off. Everything the listener uses is made here, so its ticks allocate nothing.
+     */
+    val gameLoop = scenario(
+        name = "Game loop on the tick",
+        description = "A TickListener cuts the carrier, steers two pursuers, wraps him up and puts him down (M9)",
+        seed = 31L,
+    ) {
+        val back = AthleteParams(maxSpeed = 8.8, maxAccel = 7.5, maxDecel = 8.5, turnRateAtRest = 12.0, turnRateAtMax = 2.5)
+        val chaser = AthleteParams(maxSpeed = 9.0, maxAccel = 7.5, maxDecel = 8.5, turnRateAtRest = 12.0, turnRateAtMax = 2.5)
+        val mid = field.midfieldX
+        val cy = field.widthM / 2
+        world.setAttackDirection(1)
+        val carrier = athlete(mid - 12.0, cy, 92.0, 0.32, Tags.HOME, back, LocomotionIntent.velocity(7.0, 0.0), vx = 6.0)
+        world.setBallCarrier(carrier)
+        val pursuers = arrayOf(
+            athlete(mid + 2.0, cy + 9.0, 105.0, 0.34, Tags.AWAY, chaser, LocomotionIntent.velocity(-4.0, -4.0)),
+            athlete(mid + 6.0, cy - 7.0, 100.0, 0.34, Tags.AWAY, chaser, LocomotionIntent.velocity(-4.0, 3.0)),
+        )
+        world.tickListener = object : TickListener {
+            private val cut = LocomotionIntent()
+            private val aim = LocomotionIntent()
+            private val stop = LocomotionIntent().setIdle()
+            private val wrap = GrappleDef(breakForce = 2600.0, dragForce = 900.0)
+            private var gripped = false
+            private var down = false
+
+            override fun beforeTick(world: World) {
+                if (down) return
+                val c = world.body(carrier)
+                val cx = c.x; val cyNow = c.y; val cvx = c.vx; val cvy = c.vy
+                if (world.tick % 20 == 0L) {
+                    val side = if ((world.tick / 20) % 2 == 0L) 1.0 else -1.0
+                    world.setIntent(carrier, cut.setVelocity(7.5, 3.5 * side))
+                }
+                for (p in pursuers) {
+                    val b = world.body(p)
+                    val dx = cx - b.x; val dy = cyNow - b.y
+                    val d = DMath.sqrt(dx * dx + dy * dy)
+                    if (d < 0.95 && !gripped) {
+                        world.createGrapple(p, carrier, wrap)
+                        gripped = true
+                    }
+                    // Lead him by the time it takes to get there, capped at half a second.
+                    val lead = DMath.min(d / 9.0, 0.5)
+                    world.setIntent(p, aim.setPoint(cx + cvx * lead, cyNow + cvy * lead))
+                }
+            }
+
+            override fun afterTick(world: World) {
+                if (down || !gripped) return
+                val c = world.body(carrier)
+                if (c.vx * c.vx + c.vy * c.vy < 2.25) {
+                    world.setStance(carrier, Stance.Down)
+                    world.setIntent(carrier, stop)
+                    for (p in pursuers) world.setIntent(p, stop)
+                    down = true
+                }
+            }
+        }
+    }
 
     /**
      * M6: a go route down the near sideline in a crosswind blowing toward that sideline (and a little into the
@@ -396,7 +506,7 @@ object Scenarios {
         world.launchBall(from, v, FlightMode.Spiral)
     }
 
-    val all: List<Scenario> = listOf(scrimmage, deepPass, punt, fieldGoal, tackleWithGrapple, doubleTeam, headOnTackle, sidelineRun, eventLab, contactLab, drift)
+    val all: List<Scenario> = listOf(scrimmage, backpedal, gameLoop, deepPass, punt, fieldGoal, tackleWithGrapple, doubleTeam, headOnTackle, sidelineRun, eventLab, contactLab, drift)
 
     /** Angular damping for coasting bodies (no locomotion holds their heading). */
     private const val SPIN_DAMPING = 8.0

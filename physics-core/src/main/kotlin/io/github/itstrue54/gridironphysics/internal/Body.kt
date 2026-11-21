@@ -57,8 +57,11 @@ internal class Body(
     /** The collider the body was created with: its Upright shape. */
     @JvmField val uprightShape: ShapeDef = shape
 
-    /** Lying collider for Diving and Down, built on the first stance change. */
+    /** Lying collider for Diving and Down, set on the first stance change (from [lyingSpare]). */
     @JvmField var lyingShape: ShapeDef.Capsule? = null
+
+    /** The lying collider built ahead of time (when the body is made), so the first fall allocates nothing. */
+    @JvmField var lyingSpare: ShapeDef.Capsule? = null
 
     /** The material the body was created with; Upright and Diving use it, Down uses DOWNED_PLAYER. */
     @JvmField var baseMaterial = 0

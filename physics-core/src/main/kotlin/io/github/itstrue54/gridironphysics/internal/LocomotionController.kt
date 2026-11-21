@@ -17,7 +17,9 @@ import io.github.itstrue54.gridironphysics.math.DMath
  * - while the remaining turn is large, the target speed shrinks by its cosine, so a player plants and cuts
  *   instead of running a wide circle;
  * - the total horizontal acceleration is clamped to the traction limit, and the clamped part is the Slip excess.
- * The player faces his desired direction, turning at the same speed-dependent rate.
+ * The player faces his desired direction, turning at the same speed-dependent rate, unless the intent sets a facing:
+ * then he turns toward that, and his speed cap falls to offFacingSpeed + (1 − offFacingSpeed)·max(cos θ, 0), θ the angle
+ * between the way he runs and the way he faces.
  *
  * Diving and Down players cannot drive or turn: they slide, braked by ground friction (WorldConfig.slideFriction).
  */
@@ -87,6 +89,11 @@ internal class LocomotionController(params: AthleteParams) {
             }
         }
         if (sd <= 0.0) sd = 0.0
+        if (it.hasFacing && sd > 0.0) {
+            // Backpedalling or shuffling: slower the further the run turns from where he faces.
+            val c = dx * DMath.cos(b.angle) + dy * DMath.sin(b.angle)
+            sd *= p.offFacingSpeed + (1.0 - p.offFacingSpeed) * DMath.max(c, 0.0)
+        }
         wantsMotion = sd > 0.0 || s > 0.0
 
         val turnRate = p.turnRateAtRest + (p.turnRateAtMax - p.turnRateAtRest) * DMath.min(s / p.maxSpeed, 1.0)
@@ -132,8 +139,9 @@ internal class LocomotionController(params: AthleteParams) {
         b.fx = b.mass * ax
         b.fy = b.mass * ay
 
-        // Facing: toward where he wants to go; while stopping, along his motion; at rest, unchanged.
-        val face = if (sd > 0.0) DMath.atan2(dy, dx) else if (s > STEER_SPEED) DMath.atan2(vy, vx) else b.angle
+        // Facing: the intent's facing when set; else toward where he wants to go; while stopping, along his motion;
+        // at rest, unchanged.
+        val face = if (it.hasFacing) it.faceAngle else if (sd > 0.0) DMath.atan2(dy, dx) else if (s > STEER_SPEED) DMath.atan2(vy, vx) else b.angle
         b.angularVelocity = DMath.clamp(wrap(face - b.angle) / dt, -turnRate, turnRate)
     }
 

@@ -19,6 +19,9 @@ class WorldSnapshot internal constructor(internal val bytes: ByteArray) {
     /** [World.stateHash] at that tick: a world restored from this snapshot has the same hash. */
     val stateHash: Long get() = ByteSource(bytes, HASH_OFFSET).i64()
 
+    /** The layout version the bytes were written in. */
+    internal val version: Int get() = ByteSource(bytes, 4).i32()
+
     /** Size in bytes. */
     val size: Int get() = bytes.size
 
@@ -26,8 +29,13 @@ class WorldSnapshot internal constructor(internal val bytes: ByteArray) {
     fun toByteArray(): ByteArray = bytes.copyOf()
 
     companion object {
-        /** Bumped whenever the layout changes; older snapshots are rejected, not misread. */
-        const val VERSION = 1
+        /**
+         * Bumped whenever the layout changes. Version 2 added the intent's facing and [AthleteParams.offFacingSpeed];
+         * version 1 snapshots still restore (no facing, the default offFacingSpeed). Anything else is rejected, not misread.
+         */
+        const val VERSION = 2
+
+        internal const val OLDEST = 1
 
         internal const val MAGIC = 0x4E535047 // "GPSN" little-endian
         internal const val FINGERPRINT_OFFSET = 8
@@ -46,7 +54,7 @@ class WorldSnapshot internal constructor(internal val bytes: ByteArray) {
             val r = ByteSource(b)
             require(r.i32() == MAGIC) { "not a world snapshot (bad magic)" }
             val v = r.i32()
-            require(v == VERSION) { "world snapshot version $v; this build reads version $VERSION" }
+            require(v in OLDEST..VERSION) { "world snapshot version $v; this build reads versions $OLDEST to $VERSION" }
             val stored = ByteSource(b, b.size - 8).i64()
             require(checksum(b, b.size - 8) == stored) { "world snapshot is corrupt (checksum mismatch)" }
         }

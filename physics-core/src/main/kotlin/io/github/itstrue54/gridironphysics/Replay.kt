@@ -33,6 +33,8 @@ class Replay internal constructor(
     /** Commands in the log. */
     val commandCount: Int,
     private val hashes: LongArray,
+    /** The `.gpr` layout the commands are in (version 1 intents have no facing, its athletes no offFacingSpeed). */
+    internal val version: Int = VERSION,
 ) {
     /** The tick recording began at. */
     val startTick: Long get() = snapshot.tick
@@ -49,7 +51,7 @@ class Replay internal constructor(
     /** The `.gpr` bytes. */
     fun encode(): ByteArray {
         val s = ByteSink(64 + commands.size + snapshot.size + 8 * hashes.size + 2048)
-        s.i32(MAGIC); s.i32(VERSION); s.i64(seed)
+        s.i32(MAGIC); s.i32(version); s.i64(seed)
         val c = ByteSink(2048)
         Codec.config(c, config); Codec.field(c, field)
         s.block(c.buf, 0, c.size)
@@ -62,8 +64,13 @@ class Replay internal constructor(
     }
 
     companion object {
-        /** Bumped whenever the layout or a command's payload changes. */
-        const val VERSION = 1
+        /**
+         * Bumped whenever the layout or a command's payload changes. Version 2 added the intent's facing and
+         * [AthleteParams.offFacingSpeed]; version 1 replays still decode and play.
+         */
+        const val VERSION = 2
+
+        internal const val OLDEST = 1
 
         internal const val MAGIC = 0x59525047 // "GPRY" little-endian
 
@@ -72,7 +79,7 @@ class Replay internal constructor(
             val r = ByteSource(bytes)
             require(bytes.size >= 16 && r.i32() == MAGIC) { "not a .gpr replay (bad magic)" }
             val v = r.i32()
-            require(v == VERSION) { ".gpr version $v; this build reads version $VERSION" }
+            require(v in OLDEST..VERSION) { ".gpr version $v; this build reads versions $OLDEST to $VERSION" }
             val seed = r.i64()
             val c = r.sub()
             val config = Codec.config(c)
@@ -85,7 +92,7 @@ class Replay internal constructor(
             require(n >= 0 && n.toLong() * 8 == r.remaining.toLong()) { "bad hash count $n for ${r.remaining} bytes" }
             val hashes = LongArray(n) { r.i64() }
             r.expectEnd(".gpr")
-            return Replay(config, field, seed, snapshot, commands, commandCount, hashes)
+            return Replay(config, field, seed, snapshot, commands, commandCount, hashes, v)
         }
 
         // Command ops. Payloads follow the World call; ids are BodyId/JointId values.
@@ -183,7 +190,7 @@ class ReplayRecorder(commandCapacityBytes: Int = 1 shl 20, tickCapacity: Int = 6
     override fun onSetIntent(tick: Long, id: BodyId, intent: LocomotionIntent) {
         head(tick, Replay.OP_SET_INTENT); log.i32(id.value)
         log.u8(intent.mode.ordinal); log.f64(intent.targetX); log.f64(intent.targetY); log.f64(intent.effort)
-        log.u8(intent.stance?.ordinal ?: Replay.NO_STANCE)
+        log.u8(intent.stance?.ordinal ?: Replay.NO_STANCE); log.bool(intent.hasFacing); log.f64(intent.faceAngle)
     }
 
     override fun onSetStance(tick: Long, id: BodyId, stance: Stance) {
@@ -226,6 +233,10 @@ class ReplayRecorder(commandCapacityBytes: Int = 1 shl 20, tickCapacity: Int = 6
 
     override fun onSetBallCarrier(tick: Long, id: BodyId?) {
         head(tick, Replay.OP_SET_BALL_CARRIER); log.i32(id?.value ?: -1)
+    }
+
+    override fun onGiveBall(tick: Long, id: BodyId) {
+        head(tick, Replay.OP_SET_BALL_CARRIER); log.i32(id.value)
     }
 
     override fun onSetAttackDirection(tick: Long, direction: Int) {
@@ -370,13 +381,15 @@ class ReplayPlayer(val replay: Replay) {
                 idCheck(t, "createBody", id, w.createBody(def).value)
             }
             Replay.OP_DESTROY_BODY -> w.destroyBody(bodyId())
-            Replay.OP_SET_ATHLETE -> { val id = bodyId(); w.setAthlete(id, Codec.athlete(r)) }
+            Replay.OP_SET_ATHLETE -> { val id = bodyId(); w.setAthlete(id, Codec.athlete(r, replay.version)) }
             Replay.OP_SET_INTENT -> {
                 val id = bodyId()
                 val mode = pick(LocomotionIntent.Mode.entries, r.u8(), "intent mode")
                 val x = r.f64(); val y = r.f64(); val effort = r.f64()
                 val st = r.u8()
-                intent.setRaw(mode, x, y, effort, if (st == Replay.NO_STANCE) null else pick(Stance.entries, st, "stance"))
+                val faces = replay.version >= 2 && r.bool()
+                val face = if (replay.version >= 2) r.f64() else 0.0
+                intent.setRaw(mode, x, y, effort, if (st == Replay.NO_STANCE) null else pick(Stance.entries, st, "stance"), faces, face)
                 w.setIntent(id, intent)
             }
             Replay.OP_SET_STANCE -> { val id = bodyId(); w.setStance(id, pick(Stance.entries, r.u8(), "stance")) }

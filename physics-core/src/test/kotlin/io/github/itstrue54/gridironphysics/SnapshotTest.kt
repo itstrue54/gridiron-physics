@@ -136,10 +136,11 @@ class SnapshotTest {
     @Test fun snapshotCoversEveryStateField() {
         val expected = mapOf(
             "internal.Body" to "angle angle0 angularDamping angularVelocity awake baseMaterial bullet categoryBits extent fx fy geom id inCatch " +
-                "inertia invInertia invMass lineMask linearDamping loco lyingShape maskBits mass material outOfBounds preVx preVy prevX prevY " +
+                "inertia invInertia invMass lineMask linearDamping loco lyingShape lyingSpare maskBits mass material outOfBounds preVx preVy prevX prevY " +
                 "reachHeight reachRadius shape sleepTime speedBound stance type uprightShape userData vx vy x x0 y y0",
+            // lyingSpare is derived from uprightShape; ownSoft holds soft's values when it has a spring.
             "internal.Joint" to "a angular angularMass axial axialMass b breakForce broken dragForce dragX dragY driveSpeed id inv k11 k12 k22 " +
-                "lateral len linX linY localX localY pushA pushB pushForceA pushForceB rAx rAy refAngle restLength shedThreshold soft solve type ux uy",
+                "lateral len linX linY localX localY ownSoft pushA pushB pushForceA pushForceB rAx rAy refAngle restLength shedThreshold soft solve type ux uy",
             "internal.Contact" to "a b friction idA idB key m maxNormalImpulse normalImpulse normalMass rAx rAy rBx rBy relativeVelocity " +
                 "restitution sensor solve tangentImpulse tangentMass wall",
             "internal.Manifold" to "count cpAx cpAy cpBx cpBy id nx ny px py satEdge sep",
@@ -151,13 +152,14 @@ class SnapshotTest {
             "EventReader" to "cap cur doubles head ints lostCount size ticks types",
             // Written: accumulator alpha attackDirection ball(+ballBody) bodies carrier contactCount contacts eventReader flight(wind)
             // forwardProgressX generations highWater joint* lastTickHash liveCount rng surface tick touch*. The rest is config,
-            // views, or per-step scratch that step() rebuilds before reading.
-            "World" to "accumulator alpha attackDirection ball ballBody ballId ballSlot ballView bodies broad carrier config contactCount " +
+            // views, or per-step scratch that step() rebuilds before reading. jointPool holds the joints' records; tickListener,
+            // like recorder, is the game's code; advancing, stepping and stopRequested live only inside one call.
+            "World" to "accumulator advancing alpha attackDirection ball ballBody ballId ballSlot ballView bodies broad carrier config contactCount " +
                 "contactView contacts eventReader field fingerprint fingerprintSet flight forwardProgressX fp generations highWater " +
-                "islandMinTime islandParent jointGenerations jointHighWater jointLive jointView joints lastTickHash liveCount nearDist " +
+                "islandMinTime islandParent jointGenerations jointHighWater jointLive jointPool jointView joints lastTickHash liveCount nearDist " +
                 "nextA nextB nextCount nextKey nextSensor oldContactCount oldContacts pairA pairB pairCount posts proxyActive proxyCap " +
                 "proxyMaxX proxyMaxY proxyMinX proxyMinY ray recorder rigidJoint rng seed softBiasRate softImpulseScale softMassScale " +
-                "surface sweepHit tick touchA touchB touchCap touchCount touchKey touchSensor view wallOn walls",
+                "stepping stopRequested surface sweepHit tick tickListener touchA touchB touchCap touchCount touchKey touchSensor view wallOn walls",
         )
         for ((name, fields) in expected) {
             val c = Class.forName("io.github.itstrue54.gridironphysics.$name")

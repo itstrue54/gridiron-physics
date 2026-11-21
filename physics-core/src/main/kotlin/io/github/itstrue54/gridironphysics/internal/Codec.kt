@@ -47,13 +47,18 @@ internal object Codec {
 
     fun athlete(s: ByteSink, p: AthleteParams) {
         s.f64(p.maxSpeed); s.f64(p.maxAccel); s.f64(p.maxDecel)
-        s.f64(p.turnRateAtRest); s.f64(p.turnRateAtMax); s.f64(p.traction); s.f64(p.balance)
+        s.f64(p.turnRateAtRest); s.f64(p.turnRateAtMax); s.f64(p.traction); s.f64(p.balance); s.f64(p.offFacingSpeed)
     }
 
-    fun athlete(r: ByteSource): AthleteParams = AthleteParams(
-        maxSpeed = r.f64(), maxAccel = r.f64(), maxDecel = r.f64(),
-        turnRateAtRest = r.f64(), turnRateAtMax = r.f64(), traction = r.f64(), balance = r.f64(),
-    )
+    /** [version] 1 (snapshots and replays before the facing intent) has no offFacingSpeed: it reads as the default. */
+    fun athlete(r: ByteSource, version: Int): AthleteParams {
+        val maxSpeed = r.f64(); val maxAccel = r.f64(); val maxDecel = r.f64()
+        val turnRest = r.f64(); val turnMax = r.f64(); val traction = r.f64(); val balance = r.f64()
+        val off = if (version >= 2) r.f64() else DEFAULT_ATHLETE.offFacingSpeed
+        return AthleteParams(maxSpeed, maxAccel, maxDecel, turnRest, turnMax, traction, balance, off)
+    }
+
+    private val DEFAULT_ATHLETE = AthleteParams()
 
     fun surface(s: ByteSink, v: SurfaceConfig) {
         s.str(v.name); s.f64(v.tractionMultiplier); s.f64(v.ballBounceMultiplier)

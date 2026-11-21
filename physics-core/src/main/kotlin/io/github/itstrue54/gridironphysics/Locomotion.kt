@@ -31,6 +31,12 @@ data class AthleteParams(
     val traction: Double = 0.9,
     /** 0–1. Stored for the game layer and later joints (grapple break force); M3 locomotion does not use it. */
     val balance: Double = 0.5,
+    /**
+     * 0–1: the share of top speed left when running straight across or away from the way he faces (a backpedal, a
+     * shuffle, a kick slide). Running at an angle θ to his facing, the cap is offFacingSpeed + (1 − offFacingSpeed)·max(cos θ, 0).
+     * Applies only while the intent sets a facing ([LocomotionIntent.face]).
+     */
+    val offFacingSpeed: Double = 0.7,
 ) {
     init {
         require(maxSpeed.isFinite() && maxSpeed > 0.0) { "maxSpeed must be finite and > 0: $maxSpeed" }
@@ -41,12 +47,17 @@ data class AthleteParams(
         require(turnRateAtMax <= turnRateAtRest) { "turn rate must fall with speed: turnRateAtMax $turnRateAtMax > turnRateAtRest $turnRateAtRest" }
         require(traction.isFinite() && traction > 0.0) { "traction must be finite and > 0: $traction" }
         require(balance.isFinite() && balance in 0.0..1.0) { "balance must be in 0..1: $balance" }
+        require(offFacingSpeed.isFinite() && offFacingSpeed > 0.0 && offFacingSpeed <= 1.0) { "offFacingSpeed must be in (0, 1]: $offFacingSpeed" }
     }
 }
 
 /**
  * What the game wants a player to do this tick. Mutable so the game can keep one and reuse it; [World.setIntent]
  * copies the values, so changing the object afterwards does not affect the body.
+ *
+ * By default a player faces where he wants to run. [face] makes him face a fixed direction instead while he runs
+ * another way (a defensive back's backpedal, a lineman's kick slide), at the speed cost of [AthleteParams.offFacingSpeed].
+ * [setVelocity], [setPoint] and [setIdle] clear the facing, so call [face] after them.
  */
 class LocomotionIntent {
     enum class Mode {
@@ -74,38 +85,65 @@ class LocomotionIntent {
     /** Stance to switch to along with this intent, or null to keep the current stance. */
     var stance: Stance? = null
 
+    /** True when the player faces [faceAngle] instead of where he runs. */
+    var hasFacing: Boolean = false
+        private set
+
+    /** The direction he faces (rad, world frame) while [hasFacing]. */
+    var faceAngle: Double = 0.0
+        private set
+
     fun setVelocity(vx: Double, vy: Double, effort: Double = 1.0): LocomotionIntent {
-        mode = Mode.Velocity; targetX = vx; targetY = vy; this.effort = effort
+        mode = Mode.Velocity; targetX = vx; targetY = vy; this.effort = effort; clearFacing()
         return this
     }
 
     fun setPoint(x: Double, y: Double, effort: Double = 1.0): LocomotionIntent {
-        mode = Mode.Point; targetX = x; targetY = y; this.effort = effort
+        mode = Mode.Point; targetX = x; targetY = y; this.effort = effort; clearFacing()
         return this
     }
 
     fun setIdle(): LocomotionIntent {
-        mode = Mode.Idle; targetX = 0.0; targetY = 0.0; effort = 1.0
+        mode = Mode.Idle; targetX = 0.0; targetY = 0.0; effort = 1.0; clearFacing()
+        return this
+    }
+
+    /** Faces [angle] (rad, world frame) while running wherever the mode says. The body turns there at its turn rate. */
+    fun face(angle: Double): LocomotionIntent {
+        hasFacing = true; faceAngle = angle
+        return this
+    }
+
+    /** Back to facing where he runs. */
+    fun clearFacing(): LocomotionIntent {
+        hasFacing = false; faceAngle = 0.0
         return this
     }
 
     /** Copies every field of [other] into this intent without allocating. Returns this. */
     fun copyFrom(other: LocomotionIntent): LocomotionIntent {
         mode = other.mode; targetX = other.targetX; targetY = other.targetY; effort = other.effort; stance = other.stance
+        hasFacing = other.hasFacing; faceAngle = other.faceAngle
         return this
     }
 
     /** Sets every field as is (snapshots and replays restore values that were valid when written). */
-    internal fun setRaw(mode: Mode, targetX: Double, targetY: Double, effort: Double, stance: Stance?) {
+    internal fun setRaw(
+        mode: Mode, targetX: Double, targetY: Double, effort: Double, stance: Stance?,
+        hasFacing: Boolean = false, faceAngle: Double = 0.0,
+    ) {
         this.mode = mode; this.targetX = targetX; this.targetY = targetY; this.effort = effort; this.stance = stance
+        this.hasFacing = hasFacing; this.faceAngle = faceAngle
     }
 
     internal fun validate() {
         require(targetX.isFinite() && targetY.isFinite()) { "intent target must be finite: ($targetX, $targetY)" }
         require(effort.isFinite() && effort in 0.0..1.0) { "effort must be in 0..1: $effort" }
+        require(faceAngle.isFinite()) { "face angle must be finite: $faceAngle" }
     }
 
-    override fun toString(): String = "LocomotionIntent($mode, $targetX, $targetY, effort=$effort, stance=$stance)"
+    override fun toString(): String =
+        "LocomotionIntent($mode, $targetX, $targetY, effort=$effort, stance=$stance" + (if (hasFacing) ", face=$faceAngle)" else ")")
 
     companion object {
         fun velocity(vx: Double, vy: Double, effort: Double = 1.0): LocomotionIntent = LocomotionIntent().setVelocity(vx, vy, effort)
